@@ -52,6 +52,7 @@ async function loadPaintImage(imageKey) {
 }
 
 async function deletePaintImage(imageKey) {
+  if (!imageKey) return;
   const database = await openPaintImageDB();
   try {
     await new Promise((resolve, reject) => {
@@ -66,6 +67,45 @@ async function deletePaintImage(imageKey) {
   }
 }
 
+function visitPaintFiles(node, callback) {
+  if (!node) return;
+  if (node.type === "folder") {
+    (node.children || []).forEach(child => visitPaintFiles(child, callback));
+  } else {
+    callback(node);
+  }
+}
+
+async function migrateLegacyPaintFiles() {
+  const legacyFiles = [];
+  visitPaintFiles(fs, item => {
+    if (typeof item.content === "string" && item.content.startsWith("data:image/") && !item.imageKey) {
+      legacyFiles.push(item);
+    }
+  });
+  if (!legacyFiles.length) return;
+
+  const migrated = [];
+  try {
+    for (const item of legacyFiles) {
+      const blob = await (await fetch(item.content)).blob();
+      const imageKey = `paint-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      await storePaintImage(imageKey, blob);
+      migrated.push({ item, imageKey, content: item.content });
+      item.imageKey = imageKey;
+      item.content = "";
+    }
+    saveFS();
+  } catch (error) {
+    migrated.forEach(({ item, imageKey, content }) => {
+      item.imageKey = undefined;
+      item.content = content;
+      deletePaintImage(imageKey).catch(() => {});
+    });
+    throw error;
+  }
+}
+
 function makePaintFileName() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const baseName = `画作-${timestamp}`;
@@ -77,16 +117,24 @@ function makePaintFileName() {
   return name;
 }
 
+function canvasToBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      if (blob) resolve(blob);
+      else reject(new Error("无法生成画作文件"));
+    }, "image/png");
+  });
+}
+
 async function savePaintToDesktop(canvas) {
   if (!canvas || !canvas.isConnected) return;
 
-  let imageData;
   let blob;
   try {
-    imageData = canvas.toDataURL("image/png");
-    blob = await (await fetch(imageData)).blob();
+    blob = await canvasToBlob(canvas);
+    await migrateLegacyPaintFiles();
   } catch {
-    notify("无法导出画作，请重试");
+    notify("无法保存画作，请检查浏览器存储空间后重试");
     return;
   }
 
@@ -96,7 +144,7 @@ async function savePaintToDesktop(canvas) {
   savedFile.imageKey = imageKey;
 
   try {
-    // Keep image bytes in IndexedDB; localStorage is only used for the small file metadata.
+    // Store image bytes separately so large PNGs do not exhaust localStorage.
     await storePaintImage(imageKey, blob);
     fs.children.push(savedFile);
     try {
@@ -106,22 +154,19 @@ async function savePaintToDesktop(canvas) {
       throw error;
     }
   } catch {
-    try {
-      await deletePaintImage(imageKey);
-    } catch {
-      // Ignore cleanup errors; report that the desktop save did not complete.
-    }
+    deletePaintImage(imageKey).catch(() => {});
     notify("保存到虚拟桌面失败，请检查浏览器存储权限或空间");
     return;
   }
 
-  // Keep the existing PNG download behavior as a separate export.
+  const imageUrl = URL.createObjectURL(blob);
   const link = document.createElement("a");
-  link.href = imageData;
+  link.href = imageUrl;
   link.download = fileName;
   document.body.appendChild(link);
   link.click();
   link.remove();
+  setTimeout(() => URL.revokeObjectURL(imageUrl), 1000);
 
   renderDesktop();
   refreshExplorerWindows();
@@ -143,28 +188,57 @@ function addPaintSaveButton(root = document) {
   });
 }
 
+function setPaintFileNodeIds(root = document) {
+  root.querySelectorAll?.(".file-item[data-file-id]").forEach(item => {
+    item.dataset.nodeId = item.dataset.fileId;
+  });
+}
+
+function enablePaintFileContextMenu() {
+  document.addEventListener("contextmenu", event => {
+    const fileItem = event.target.closest(".file-item[data-file-id]");
+    const desktopFile = event.target.closest(".desktop-icon[data-node-id]");
+    const item = fileItem || desktopFile;
+    if (!item) return;
+
+    const nodeId = item.dataset.nodeId || item.dataset.fileId;
+    if (!nodeId || !findNode(nodeId)) return;
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    showNodeContextMenu(nodeId, event.clientX, event.clientY);
+  }, true);
+}
+
 addPaintSaveButton();
+setPaintFileNodeIds();
+enablePaintFileContextMenu();
 
 if (typeof MutationObserver !== "undefined") {
   const paintSaveObserver = new MutationObserver(records => {
     records.forEach(record => {
       record.addedNodes.forEach(node => {
-        if (node.nodeType === Node.ELEMENT_NODE) addPaintSaveButton(node);
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          addPaintSaveButton(node);
+          setPaintFileNodeIds(node);
+        }
       });
     });
   });
   paintSaveObserver.observe(document.documentElement, { childList: true, subtree: true });
 }
 
-// Open saved PNG files from the virtual desktop in the existing notepad window.
+// Keep the app's normal text-file editor while rendering saved paint files as images.
 const renderNotepadWithoutPaintImage = renderNotepad;
 renderNotepad = function (fileId) {
   const savedFile = findNode(fileId);
-  if (!savedFile?.imageKey) return renderNotepadWithoutPaintImage(fileId);
+  if (!savedFile?.imageKey && !(typeof savedFile?.content === "string" && savedFile.content.startsWith("data:image/"))) {
+    return renderNotepadWithoutPaintImage(fileId);
+  }
 
   return `
     <div style="width:100%;height:100%;display:grid;place-items:center;overflow:auto;padding:16px;background:#f7f8fb;">
-      <img data-paint-image="${savedFile.imageKey}" alt="${escapeHTML(savedFile.name)}" style="display:block;max-width:100%;max-height:100%;object-fit:contain;" />
+      <img data-paint-image="${escapeHTML(savedFile.imageKey || "")}" data-legacy-paint-image="${savedFile.imageKey ? "" : escapeHTML(savedFile.content)}" alt="${escapeHTML(savedFile.name)}" style="display:block;max-width:100%;max-height:100%;object-fit:contain;" />
     </div>
   `;
 };
@@ -177,9 +251,38 @@ bindAppContentEvents = function (appName, win) {
   const image = win.querySelector("[data-paint-image]");
   if (!image) return;
 
+  const legacyImage = image.dataset.legacyPaintImage;
+  if (legacyImage) {
+    image.src = legacyImage;
+    return;
+  }
+
   loadPaintImage(image.dataset.paintImage).then(blob => {
-    if (blob && image.isConnected) image.src = URL.createObjectURL(blob);
+    if (blob && image.isConnected) {
+      const objectUrl = URL.createObjectURL(blob);
+      image.onload = () => URL.revokeObjectURL(objectUrl);
+      image.src = objectUrl;
+    }
   }).catch(() => {
     if (image.isConnected) notify("无法读取这幅画作");
   });
 };
+
+// Remove IndexedDB image data when a saved drawing is deleted from the virtual desktop.
+const handleContextActionWithoutPaintCleanup = handleContextAction;
+handleContextAction = function (action, nodeId) {
+  const target = action === "delete" ? findNode(nodeId) : null;
+  const imageKey = target?.imageKey;
+  handleContextActionWithoutPaintCleanup(action, nodeId);
+
+  if (imageKey && !findNode(nodeId)) {
+    deletePaintImage(imageKey).catch(() => {
+      notify("文件已从虚拟桌面删除，但图片数据清理失败");
+    });
+  }
+};
+
+// Move any older, oversized data-URL paintings out of localStorage on startup.
+migrateLegacyPaintFiles().catch(() => {
+  // Leave the original data intact if migration cannot complete; saving will show an error.
+});
