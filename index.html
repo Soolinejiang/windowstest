@@ -1,0 +1,60 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Windows Web</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main id="desktop" class="desktop"></main>
+
+  <section class="panel start-menu" id="startMenu">
+    <input class="start-search" id="startSearch" placeholder="Search..." />
+    <div class="heading">
+      <span>应用</span>
+      <button id="allAppsBtn">All apps</button>
+    </div>
+    <div id="appGrid" class="app-grid"></div>
+  </section>
+
+  <section class="panel notifications" id="notifications">
+    <div class="heading">
+      <span>通知</span>
+      <button id="clearNotifications">清空</button>
+    </div>
+    <div id="notificationCard" class="notification-card">
+      Windows Web 运行中<br />
+      现在是 2026 年，欢迎体验。
+    </div>
+  </section>
+
+  <div class="context-menu" id="contextMenu"></div>
+  <div class="toast" id="toast"></div>
+
+  <footer class="taskbar">
+    <div class="taskbar-center">
+      <button class="task-button" id="startButton" title="开始"></button>
+
+      <label class="task-search" id="taskSearch">
+        <input id="taskSearchInput" placeholder="Search..." />
+      </label>
+
+      <div id="taskButtons" class="task-buttons"></div>
+    </div>
+
+    <div class="tray">
+      <button id="quickButton" title="通知">🔔</button>
+      <button id="clockButton" title="时钟">
+        <div id="clockTime">00:00</div>
+        <div id="clockDate">2026/11/08</div>
+      </button>
+    </div>
+  </footer>
+
+  <script src="./data.js"></script>
+  <script src="./filesystem.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
