@@ -79,7 +79,9 @@ function visitPaintFiles(node, callback) {
 async function migrateLegacyPaintFiles() {
   const legacyFiles = [];
   visitPaintFiles(fs, item => {
-    if (typeof item.content === "string" && item.content.startsWith("data:image/") && !item.imageKey) {
+    // Older versions saved the data URL in localStorage even when an imageKey
+    // was also present. Migrate those too, or filesystem writes can hit quota.
+    if (typeof item.content === "string" && item.content.startsWith("data:image/")) {
       legacyFiles.push(item);
     }
   });
@@ -89,22 +91,28 @@ async function migrateLegacyPaintFiles() {
   try {
     for (const item of legacyFiles) {
       const blob = await (await fetch(item.content)).blob();
-      const imageKey = `paint-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const imageKey = item.imageKey || `paint-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       await storePaintImage(imageKey, blob);
       migrated.push({ item, imageKey, content: item.content });
       item.imageKey = imageKey;
       item.content = "";
     }
+    // Remove the large data URLs before any later filesystem operation.
     saveFS();
   } catch (error) {
     migrated.forEach(({ item, imageKey, content }) => {
-      item.imageKey = undefined;
+      item.imageKey = item.imageKey === imageKey ? undefined : item.imageKey;
       item.content = content;
       deletePaintImage(imageKey).catch(() => {});
     });
     throw error;
   }
 }
+
+let paintMigrationReady = migrateLegacyPaintFiles().catch(error => {
+  console.error("画作迁移失败", error);
+  return false;
+});
 
 function makePaintFileName() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -132,6 +140,8 @@ async function savePaintToDesktop(canvas) {
   let blob;
   try {
     blob = await canvasToBlob(canvas);
+    await paintMigrationReady;
+    // Retry migration if startup storage was not available at first.
     await migrateLegacyPaintFiles();
   } catch {
     notify("无法保存画作，请检查浏览器存储空间后重试");
@@ -144,7 +154,6 @@ async function savePaintToDesktop(canvas) {
   savedFile.imageKey = imageKey;
 
   try {
-    // Store image bytes separately so large PNGs do not exhaust localStorage.
     await storePaintImage(imageKey, blob);
     fs.children.push(savedFile);
     try {
@@ -228,7 +237,6 @@ if (typeof MutationObserver !== "undefined") {
   paintSaveObserver.observe(document.documentElement, { childList: true, subtree: true });
 }
 
-// Keep the app's normal text-file editor while rendering saved paint files as images.
 const renderNotepadWithoutPaintImage = renderNotepad;
 renderNotepad = function (fileId) {
   const savedFile = findNode(fileId);
@@ -262,27 +270,38 @@ bindAppContentEvents = function (appName, win) {
       const objectUrl = URL.createObjectURL(blob);
       image.onload = () => URL.revokeObjectURL(objectUrl);
       image.src = objectUrl;
+    } else if (image.isConnected) {
+      notify("找不到画作图片数据，请尝试重新保存画作");
     }
   }).catch(() => {
     if (image.isConnected) notify("无法读取这幅画作");
   });
 };
 
-// Remove IndexedDB image data when a saved drawing is deleted from the virtual desktop.
 const handleContextActionWithoutPaintCleanup = handleContextAction;
-handleContextAction = function (action, nodeId) {
-  const target = action === "delete" ? findNode(nodeId) : null;
+handleContextAction = async function (action, nodeId) {
+  if (action !== "delete") {
+    return handleContextActionWithoutPaintCleanup(action, nodeId);
+  }
+
+  // Free legacy storage first so the filesystem delete can persist successfully.
+  try {
+    await paintMigrationReady;
+    await migrateLegacyPaintFiles();
+  } catch {
+    notify("无法整理旧画作数据，暂时无法安全删除文件");
+    return;
+  }
+
+  const target = findNode(nodeId);
   const imageKey = target?.imageKey;
   handleContextActionWithoutPaintCleanup(action, nodeId);
 
   if (imageKey && !findNode(nodeId)) {
-    deletePaintImage(imageKey).catch(() => {
-      notify("文件已从虚拟桌面删除，但图片数据清理失败");
-    });
+    try {
+      await deletePaintImage(imageKey);
+    } catch {
+      notify("文件已删除，但图片数据清理失败");
+    }
   }
 };
-
-// Move any older, oversized data-URL paintings out of localStorage on startup.
-migrateLegacyPaintFiles().catch(() => {
-  // Leave the original data intact if migration cannot complete; saving will show an error.
-});
