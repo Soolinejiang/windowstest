@@ -1,10 +1,18 @@
 const state = {
   windows: new Map(),
   zIndex: 100,
-  notifications: []
+  notifications: [],
+  toastTimer: null,
+  dragState: null,
+  clipboard: {
+    mode: "none", // none | copy | cut
+    nodeId: null
+  },
+  darkMode: false
 };
 
 document.addEventListener("DOMContentLoaded", () => {
+  applyTheme();
   renderDesktop();
   renderAppGrid();
   renderTaskbar();
@@ -14,10 +22,17 @@ document.addEventListener("DOMContentLoaded", () => {
   openApp("explorer");
 });
 
+function applyTheme() {
+  document.body.classList.toggle("dark", state.darkMode);
+}
+
 function notify(msg) {
   const toast = document.getElementById("toast");
+  if (!toast) return;
+
   toast.textContent = msg;
   toast.classList.add("show");
+
   clearTimeout(state.toastTimer);
   state.toastTimer = setTimeout(() => {
     toast.classList.remove("show");
@@ -26,6 +41,7 @@ function notify(msg) {
 
 function addNotification(msg) {
   state.notifications.unshift(msg);
+
   const card = document.getElementById("notificationCard");
   if (card) {
     card.innerHTML = state.notifications
@@ -43,6 +59,8 @@ document.getElementById("clearNotifications")?.addEventListener("click", () => {
 
 function renderDesktop() {
   const desktop = document.getElementById("desktop");
+  if (!desktop) return;
+
   desktop.innerHTML = "";
 
   const items = fs.children || [];
@@ -73,12 +91,14 @@ function renderAppGrid() {
   const container = document.getElementById("appGrid");
   if (!container) return;
 
-  container.innerHTML = Object.entries(APPS).map(([key, app]) => `
-    <button class="app-card" data-launch="${key}">
-      <span class="icon">${app.icon}</span>
-      <span class="name">${app.title}</span>
-    </button>
-  `).join("");
+  container.innerHTML = Object.entries(APPS)
+    .map(([key, app]) => `
+      <button class="app-card" data-launch="${key}" type="button">
+        <span class="icon">${app.icon}</span>
+        <span class="name">${app.title}</span>
+      </button>
+    `)
+    .join("");
 }
 
 function renderTaskbar() {
@@ -86,46 +106,65 @@ function renderTaskbar() {
   if (!container) return;
 
   const apps = [...state.windows.keys()];
+  const activeSet = new Set();
 
-  container.innerHTML = apps.map(appName => `
-    <button class="task-btn ${document.querySelector(`.window[data-app="${appName}"]`)?.classList.contains("focused") ? "active" : ""}" data-task-app="${appName}">
-      <span>${APPS[appName].icon}</span>
-      <span class="title">${APPS[appName].title}</span>
-    </button>
-  `).join("");
+  document.querySelectorAll(".window.focused").forEach(win => {
+    if (win.dataset.app) activeSet.add(win.dataset.app);
+  });
+
+  container.innerHTML = apps
+    .map(appName => {
+      const isActive = activeSet.has(appName);
+      return `
+        <button class="task-btn ${isActive ? "active" : ""}" data-task-app="${appName}" type="button">
+          <span>${APPS[appName]?.icon || "🪟"}</span>
+          <span class="title">${APPS[appName]?.title || appName}</span>
+        </button>
+      `;
+    })
+    .join("");
 }
 
 function bindGlobalEvents() {
-  document.getElementById("startButton")?.addEventListener("click", () => {
+  document.getElementById("startButton")?.addEventListener("click", (e) => {
+    e.stopPropagation();
     const menu = document.getElementById("startMenu");
-    menu.classList.toggle("show");
+    const noti = document.getElementById("notifications");
+    if (menu) {
+      const show = !menu.classList.contains("show");
+      menu.classList.toggle("show", show);
+      if (show) noti?.classList.remove("show");
+    }
   });
 
   document.getElementById("allAppsBtn")?.addEventListener("click", () => {
-    const menu = document.getElementById("startMenu");
-    menu.classList.add("show");
+    document.getElementById("startMenu")?.classList.add("show");
   });
 
-  document.getElementById("quickButton")?.addEventListener("click", () => {
-    const notifications = document.getElementById("notifications");
-    notifications.classList.toggle("show");
+  document.getElementById("quickButton")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const noti = document.getElementById("notifications");
+    const menu = document.getElementById("startMenu");
+    if (noti) {
+      const show = !noti.classList.contains("show");
+      noti.classList.toggle("show", show);
+      if (show) menu?.classList.remove("show");
+    }
   });
 
   document.getElementById("taskSearchInput")?.addEventListener("input", (e) => {
     const q = e.target.value.trim().toLowerCase();
-    const cards = document.querySelectorAll(".app-card");
-    cards.forEach(card => {
-      const name = card.textContent.toLowerCase();
-      card.style.display = name.includes(q) ? "flex" : "none";
+    document.querySelectorAll(".app-card").forEach(card => {
+      const text = card.textContent.toLowerCase();
+      card.style.display = text.includes(q) ? "flex" : "none";
     });
   });
 
   document.getElementById("startSearch")?.addEventListener("input", (e) => {
     const q = e.target.value.trim().toLowerCase();
-    const cards = document.querySelectorAll(".app-card");
-    cards.forEach(card => {
-      const name = card.textContent.toLowerCase();
-      card.style.display = name.includes(q) ? "flex" : "none";
+    document.querySelectorAll(".app-card").forEach(card => {
+      const text = card.textContent.toLowerCase();
+      card.style.display = text.includes(q) ? "flex" : "none";
     });
   });
 
@@ -134,8 +173,7 @@ function bindGlobalEvents() {
     if (launchBtn) {
       const appName = launchBtn.dataset.launch;
       openApp(appName);
-      const menu = document.getElementById("startMenu");
-      menu.classList.remove("show");
+      document.getElementById("startMenu")?.classList.remove("show");
       return;
     }
 
@@ -151,92 +189,238 @@ function bindGlobalEvents() {
       return;
     }
 
-    const mainWin = event.target.closest(".window");
-    if (mainWin) {
-      focusWindow(mainWin);
+    const win = event.target.closest(".window");
+    if (win) {
+      focusWindow(win);
+    }
+
+    const actionBtn = event.target.closest("[data-context-action]");
+    if (actionBtn) {
+      handleContextAction(actionBtn.dataset.contextAction, actionBtn.dataset.nodeId);
+      return;
     }
 
     if (!event.target.closest(".context-menu") && !event.target.closest(".desktop-icon")) {
       document.getElementById("contextMenu")?.classList.remove("show");
     }
+
+    if (!event.target.closest("#startButton") && !event.target.closest("#startMenu")) {
+      document.getElementById("startMenu")?.classList.remove("show");
+    }
+
+    if (!event.target.closest("#quickButton") && !event.target.closest("#notifications")) {
+      document.getElementById("notifications")?.classList.remove("show");
+    }
   });
 
   document.addEventListener("contextmenu", (event) => {
-    const isDesktop = event.target.closest("#desktop");
-    if (!isDesktop) return;
+    const desktopTarget = event.target.closest("#desktop");
+    if (desktopTarget) {
+      event.preventDefault();
+      showDesktopContextMenu(event.clientX, event.clientY);
+      return;
+    }
 
-    event.preventDefault();
-
-    const menu = document.getElementById("contextMenu");
-    menu.innerHTML = `
-      <button data-context="new-folder">新建文件夹</button>
-      <button data-context="new-file">新建文件</button>
-      <div class="separator"></div>
-      <button data-context="refresh">刷新</button>
-    `;
-    menu.classList.add("show");
-    menu.style.left = `${event.clientX}px`;
-    menu.style.top = `${event.clientY}px`;
+    const nodeEl = event.target.closest("[data-node-id]");
+    if (nodeEl) {
+      event.preventDefault();
+      showNodeContextMenu(nodeEl.dataset.nodeId, event.clientX, event.clientY);
+    }
   });
 
-  document.addEventListener("click", (event) => {
-    const action = event.target.closest("[data-context]");
-    if (!action) return;
+  document.addEventListener("pointerdown", (event) => {
+    const titlebar = event.target.closest(".titlebar");
+    const win = event.target.closest(".window");
+    if (!titlebar || !win || event.target.closest("button")) return;
+    if (win.classList.contains("maximized")) return;
 
-    const ctx = action.dataset.context;
-    if (ctx === "refresh") {
+    state.dragState = {
+      win,
+      offsetX: event.clientX - win.offsetLeft,
+      offsetY: event.clientY - win.offsetTop
+    };
+    focusWindow(win);
+  });
+
+  document.addEventListener("pointermove", (event) => {
+    if (!state.dragState) return;
+    const { win, offsetX, offsetY } = state.dragState;
+    win.style.left = `${event.clientX - offsetX}px`;
+    win.style.top = `${event.clientY - offsetY}px`;
+  });
+
+  document.addEventListener("pointerup", () => {
+    state.dragState = null;
+  });
+}
+
+function showDesktopContextMenu(x, y) {
+  const menu = document.getElementById("contextMenu");
+  if (!menu) return;
+
+  const hasClipboard = state.clipboard.mode !== "none" && state.clipboard.nodeId;
+
+  menu.innerHTML = `
+    <button type="button" data-context-action="new-folder">新建文件夹</button>
+    <button type="button" data-context-action="new-file">新建文件</button>
+    ${hasClipboard ? `<button type="button" data-context-action="paste" data-node-id="${fs.id}">粘贴</button>` : ""}
+    <div class="separator"></div>
+    <button type="button" data-context-action="refresh">刷新</button>
+  `;
+
+  menu.classList.add("show");
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+}
+
+function showNodeContextMenu(nodeId, x, y) {
+  const menu = document.getElementById("contextMenu");
+  if (!menu) return;
+
+  const node = findNode(nodeId);
+  const hasClipboard = state.clipboard.mode !== "none" && state.clipboard.nodeId;
+
+  menu.innerHTML = `
+    <button type="button" data-context-action="open-node" data-node-id="${nodeId}">
+      ${node?.type === "folder" ? "打开" : "打开文件"}
+    </button>
+    <button type="button" data-context-action="rename" data-node-id="${nodeId}">重命名</button>
+    <button type="button" data-context-action="copy" data-node-id="${nodeId}">复制</button>
+    <button type="button" data-context-action="cut" data-node-id="${nodeId}">剪切</button>
+    <button type="button" data-context-action="delete" data-node-id="${nodeId}">删除</button>
+    ${hasClipboard ? `<button type="button" data-context-action="paste" data-node-id="${nodeId}">粘贴到这里</button>` : ""}
+    <div class="separator"></div>
+    <button type="button" data-context-action="refresh">刷新</button>
+  `;
+
+  menu.classList.add("show");
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+}
+
+function handleContextAction(action, nodeId) {
+  const menu = document.getElementById("contextMenu");
+  menu?.classList.remove("show");
+
+  switch (action) {
+    case "refresh":
       renderDesktop();
       notify("已刷新桌面");
-    }
-    if (ctx === "new-folder") {
+      break;
+
+    case "new-folder": {
       const name = prompt("请输入文件夹名称", "新建文件夹");
-      if (!name || !name.trim()) return;
+      if (!name || !name.trim()) break;
       createNode(fs.id, "folder", name.trim());
       renderDesktop();
       notify("已创建文件夹");
+      break;
     }
-    if (ctx === "new-file") {
+
+    case "new-file": {
       const name = prompt("请输入文件名", "新建文件.txt");
-      if (!name || !name.trim()) return;
+      if (!name || !name.trim()) break;
       createNode(fs.id, "file", name.trim());
       renderDesktop();
       notify("已创建文件");
+      break;
     }
 
-    document.getElementById("contextMenu").classList.remove("show");
-  });
+    case "open-node": {
+      if (!nodeId) break;
+      const node = findNode(nodeId);
+      if (!node) break;
 
-  const closeButtons = document.querySelectorAll("[data-window]");
-  closeButtons.forEach(btn => {
-    btn.addEventListener("click", (e) => {
-      const win = e.target.closest(".window");
-      if (!win) return;
-      const action = btn.dataset.window;
+      if (node.type === "folder") {
+        openApp("explorer", { nodeId: node.id });
+      } else {
+        openApp("notepad", { fileId: node.id });
+      }
+      break;
+    }
 
-      if (action === "close") {
-        const appName = win.dataset.app;
-        win.remove();
-        state.windows.delete(appName);
+    case "rename": {
+      if (!nodeId) break;
+      const node = findNode(nodeId);
+      if (!node) break;
+
+      const newName = prompt("请输入新名称", node.name);
+      if (!newName || !newName.trim()) break;
+
+      if (renameNode(nodeId, newName)) {
+        renderDesktop();
         renderTaskbar();
+        notify("已重命名");
+      }
+      break;
+    }
+
+    case "copy": {
+      if (!nodeId) break;
+      if (!findNode(nodeId)) break;
+
+      state.clipboard = {
+        mode: "copy",
+        nodeId
+      };
+      notify("已复制");
+      break;
+    }
+
+    case "cut": {
+      if (!nodeId) break;
+      if (!findNode(nodeId)) break;
+
+      state.clipboard = {
+        mode: "cut",
+        nodeId
+      };
+      notify("已剪切");
+      break;
+    }
+
+    case "paste": {
+      const targetFolderId = nodeId || fs.id;
+      const targetFolder = findNode(targetFolderId);
+
+      if (!targetFolder || targetFolder.type !== "folder") break;
+      if (!state.clipboard.nodeId) break;
+
+      const sourceNode = findNode(state.clipboard.nodeId);
+      if (!sourceNode) break;
+
+      if (state.clipboard.mode === "copy") {
+        const ok = pasteNodeIntoFolder(state.clipboard.nodeId, targetFolderId);
+        if (ok) {
+          renderDesktop();
+          notify("已粘贴");
+        }
+      } else if (state.clipboard.mode === "cut") {
+        const ok = moveNode(state.clipboard.nodeId, targetFolderId);
+        if (ok) {
+          renderDesktop();
+          notify("已移动");
+        }
       }
 
-      if (action === "minimize") {
-        win.classList.add("minimized");
-      }
+      state.clipboard = { mode: "none", nodeId: null };
+      break;
+    }
 
-      if (action === "maximize") {
-        win.classList.toggle("maximized");
-      }
-    });
-  });
+    case "delete": {
+      if (!nodeId) break;
+      if (!confirm("确定删除该项吗？")) break;
 
-  document.addEventListener("dblclick", (event) => {
-    const item = event.target.closest(".desktop-icon");
-    if (!item) return;
-    const nodeId = item.dataset.nodeId;
-    const node = findNode(nodeId);
-    if (node?.type === "folder") openApp("explorer", { nodeId });
-  });
+      if (deleteNode(nodeId)) {
+        renderDesktop();
+        notify("已删除");
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
 }
 
 function focusWindow(win) {
@@ -276,7 +460,6 @@ function openApp(appName, options = {}) {
 
   win.classList.remove("minimized");
   win.classList.add("show");
-
   focusWindow(win);
   renderTaskbar();
 }
@@ -289,6 +472,10 @@ function createWindow(appName) {
   const icon = APPS[appName]?.icon || "🪟";
   const title = APPS[appName]?.title || "应用";
 
+  const total = state.windows.size;
+  win.style.left = `${120 + total * 36}px`;
+  win.style.top = `${70 + total * 22}px`;
+
   win.innerHTML = `
     <header class="titlebar">
       <div class="window-title">
@@ -296,15 +483,42 @@ function createWindow(appName) {
         <span>${title}</span>
       </div>
       <div class="window-controls">
-        <button data-window="minimize" title="最小化">—</button>
-        <button data-window="maximize" title="最大化">□</button>
-        <button class="close" data-window="close" title="关闭">✕</button>
+        <button type="button" data-window-control="minimize" title="最小化">—</button>
+        <button type="button" data-window-control="maximize" title="最大化">□</button>
+        <button type="button" class="close" data-window-control="close" title="关闭">✕</button>
       </div>
     </header>
     <div class="window-content"></div>
   `;
 
   document.body.appendChild(win);
+
+  win.querySelectorAll("[data-window-control]").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+
+      const action = btn.dataset.windowControl;
+      const appName = win.dataset.app;
+
+      if (action === "close") {
+        win.remove();
+        state.windows.delete(appName);
+        renderTaskbar();
+        return;
+      }
+
+      if (action === "minimize") {
+        win.classList.add("minimized");
+        renderTaskbar();
+        return;
+      }
+
+      if (action === "maximize") {
+        win.classList.toggle("maximized");
+      }
+    });
+  });
+
   return win;
 }
 
@@ -356,41 +570,79 @@ function renderAppContent(appName, options = {}) {
 
 function bindAppContentEvents(appName, win) {
   const content = win.querySelector(".window-content");
-
   if (!content) return;
+
+  if (appName === "explorer") {
+    content.querySelectorAll(".file-item").forEach(item => {
+      item.addEventListener("click", () => {
+        const nodeId = item.dataset.fileId;
+        const type = item.dataset.fileType;
+
+        if (type === "folder") {
+          openApp("explorer", { nodeId });
+        } else if (type === "file") {
+          openApp("notepad", { fileId: nodeId });
+        }
+      });
+    });
+
+    content.querySelectorAll("[data-go-back]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const currentId = btn.dataset.current;
+        const current = findNode(currentId);
+        const parent = current ? findParent(currentId) : null;
+        if (parent) openApp("explorer", { nodeId: parent.id });
+      });
+    });
+
+    content.querySelectorAll("[data-go-root]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        openApp("explorer", { nodeId: fs.id });
+      });
+    });
+  }
 
   if (appName === "calculator") {
     content.querySelectorAll(".calc-key").forEach(btn => {
       btn.addEventListener("click", () => {
         const display = content.querySelector(".calc-display");
+        if (!display) return;
+
         const value = btn.textContent.trim();
 
         if (value === "C") {
           display.value = "0";
+          display.dataset.expr = "";
           return;
         }
 
         if (value === "=") {
           try {
-            const expr = display.value.replace(/×/g, "*").replace(/÷/g, "/");
-            display.value = Number(eval(expr)).toString();
+            const expr = (display.dataset.expr || display.value || "0")
+              .replace(/×/g, "*")
+              .replace(/÷/g, "/");
+            const result = Function(`"use strict"; return (${expr});`)();
+            display.value = Number.isFinite(result) ? String(result) : "Error";
+            display.dataset.expr = display.value;
           } catch {
             display.value = "Error";
+            display.dataset.expr = "";
           }
           return;
         }
 
-        if (display.value === "0" || display.value === "Error") {
-          display.value = value === "." ? "0." : value;
-        } else {
-          display.value += value;
-        }
+        const existing = display.dataset.expr || "0";
+        const next = existing === "0" ? value : existing + value;
+        display.dataset.expr = next;
+        display.value = next;
       });
     });
   }
 
   if (appName === "paint") {
     const canvas = content.querySelector("canvas");
+    if (!canvas) return;
+
     const ctx = canvas.getContext("2d");
     let drawing = false;
     let lastX = 0;
@@ -399,8 +651,11 @@ function bindAppContentEvents(appName, win) {
     const resizeCanvas = () => {
       const rect = canvas.getBoundingClientRect();
       const ratio = window.devicePixelRatio || 1;
-      canvas.width = rect.width * ratio;
-      canvas.height = rect.height * ratio;
+
+      canvas.width = Math.max(1, Math.floor(rect.width * ratio));
+      canvas.height = Math.max(1, Math.floor(rect.height * ratio));
+
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.scale(ratio, ratio);
     };
 
@@ -415,12 +670,13 @@ function bindAppContentEvents(appName, win) {
 
     canvas.addEventListener("pointermove", (e) => {
       if (!drawing) return;
+
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
 
-      const color = content.querySelector("[data-color]").value;
-      const size = Number(content.querySelector("[data-size]").value);
+      const color = content.querySelector("[data-color]")?.value || "#1a73e8";
+      const size = Number(content.querySelector("[data-size]")?.value || 5);
 
       ctx.beginPath();
       ctx.moveTo(lastX, lastY);
@@ -434,10 +690,10 @@ function bindAppContentEvents(appName, win) {
       lastY = y;
     });
 
-    canvas.addEventListener("pointerup", () => drawing = false);
-    canvas.addEventListener("pointerleave", () => drawing = false);
+    canvas.addEventListener("pointerup", () => { drawing = false; });
+    canvas.addEventListener("pointerleave", () => { drawing = false; });
 
-    content.querySelector("[data-clear]").addEventListener("click", () => {
+    content.querySelector("[data-clear]")?.addEventListener("click", () => {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
     });
   }
@@ -445,6 +701,7 @@ function bindAppContentEvents(appName, win) {
   if (appName === "terminal") {
     const input = content.querySelector(".terminal-input");
     const output = content.querySelector(".terminal-output");
+    if (!input || !output) return;
 
     input.addEventListener("keydown", (e) => {
       if (e.key !== "Enter") return;
@@ -472,6 +729,8 @@ function bindAppContentEvents(appName, win) {
   if (appName === "browser") {
     const iframe = content.querySelector(".browser-frame");
     const input = content.querySelector(".address");
+    if (!iframe || !input) return;
+
     content.querySelectorAll("[data-browser]").forEach(btn => {
       btn.addEventListener("click", () => {
         const cmd = btn.dataset.browser;
@@ -480,7 +739,6 @@ function bindAppContentEvents(appName, win) {
         if (cmd === "go" && url) {
           iframe.src = url;
         }
-
         if (cmd === "back") iframe.contentWindow?.history.back();
         if (cmd === "forward") iframe.contentWindow?.history.forward();
         if (cmd === "home") iframe.src = "https://www.bing.com/";
@@ -497,14 +755,25 @@ function bindAppContentEvents(appName, win) {
 
   if (appName === "notepad") {
     const textarea = content.querySelector("textarea");
+    if (!textarea) return;
+
     textarea.addEventListener("input", () => {
       const fileId = textarea.dataset.fileId;
       if (!fileId) return;
+
       const node = findNode(fileId);
       if (node) {
         node.content = textarea.value;
         saveFS();
       }
+    });
+  }
+
+  if (appName === "settings") {
+    content.querySelector("[data-theme-toggle]")?.addEventListener("click", () => {
+      state.darkMode = !state.darkMode;
+      applyTheme();
+      notify(state.darkMode ? "已切换到深色模式" : "已切换到浅色模式");
     });
   }
 }
@@ -544,27 +813,40 @@ function runTerminalCommand(cmd) {
     return "终端已关闭";
   }
 
+  if (lower.startsWith("open ")) {
+    const appKey = lower.replace("open ", "").trim();
+    if (APPS[appKey]) {
+      openApp(appKey);
+      return `已打开 ${APPS[appKey].title}`;
+    }
+  }
+
   return `命令不存在: ${cmd}`;
 }
 
 function renderExplorer(nodeId) {
   const currentNode = findNode(nodeId) || fs;
+  const parent = currentNode && currentNode.id !== fs.id ? findParent(currentNode.id) : null;
   const children = currentNode.children || [];
 
-  const items = children.map(item => {
-    const icon = item.type === "folder" ? "📁" : "📄";
-    return `
-      <div class="file-item" data-file-id="${item.id}" data-file-type="${item.type}">
-        <span class="icon">${icon}</span>
-        <span>${item.name}</span>
-      </div>
-    `;
-  }).join("");
+  const items = children
+    .map(item => {
+      const icon = item.type === "folder" ? "📁" : "📄";
+      return `
+        <div class="file-item" data-file-id="${item.id}" data-file-type="${item.type}" data-node-id="${item.id}">
+          <span class="icon">${icon}</span>
+          <span>${item.name}</span>
+        </div>
+      `;
+    })
+    .join("");
 
   return `
     <div class="explorer-layout">
       <aside class="sidebar">
-        <div class="nav-item selected">📁 桌面</div>
+        <div class="nav-item selected">📁 ${fs.name}</div>
+        <div class="nav-item" data-go-root data-current="${currentNode.id}">🏠 根目录</div>
+        ${parent ? `<div class="nav-item" data-go-back data-current="${currentNode.id}">⬅ 返回上一级</div>` : ""}
         <div class="nav-item">📄 文档</div>
         <div class="nav-item">📥 下载</div>
         <div class="nav-item">🖼️ 图片</div>
@@ -572,7 +854,9 @@ function renderExplorer(nodeId) {
       </aside>
       <div class="files-area">
         <h2>${currentNode.name}</h2>
-        <div class="file-grid">${items || '<div style="padding:10px;color:#666;">暂无内容</div>'}</div>
+        <div class="file-grid">
+          ${items || '<div style="padding:10px;color:#666;">暂无内容</div>'}
+        </div>
       </div>
     </div>
   `;
@@ -582,15 +866,15 @@ function renderBrowser() {
   return `
     <div class="browser-wrap">
       <div class="browser-toolbar">
-        <button data-browser="back">←</button>
-        <button data-browser="forward">→</button>
-        <button data-browser="home">⌂</button>
+        <button data-browser="back" type="button">←</button>
+        <button data-browser="forward" type="button">→</button>
+        <button data-browser="home" type="button">⌂</button>
         <input class="address" value="https://www.bing.com/" />
-        <button data-browser="go">Go</button>
+        <button data-browser="go" type="button">Go</button>
       </div>
       <div class="browser-bookmarks">
         ${BOOKMARKS.map(item => `
-          <button class="bm-card" data-url="${item.url}">
+          <button class="bm-card" data-url="${item.url}" type="button">
             <span>${item.icon}</span>
             <span>${item.name}</span>
           </button>
@@ -602,35 +886,38 @@ function renderBrowser() {
 }
 
 function renderNotepad(fileId) {
-  const file = findNode(fileId) || { name: "新建记事本.txt", content: "" };
+  const file = findNode(fileId) || { id: "tmp", name: "新建记事本.txt", content: "" };
   return `
     <textarea class="notepad" data-file-id="${file.id}">${file.content || ""}</textarea>
   `;
 }
 
 function renderCalculator() {
-  const keys = ["C", "/", "*", "-", "7", "8", "9", "+", "4", "5", "6", "=", "1", "2", "3", "0", "."];
+  const keys = ["C", "÷", "×", "-", "7", "8", "9", "+", "4", "5", "6", "=", "1", "2", "3", "0", "."];
   return `
     <div class="calc">
-      <input class="calc-display" value="0" readonly />
+      <input class="calc-display" data-expr="0" value="0" readonly />
       <div class="calc-grid">
-        ${keys.map(key => `<button class="calc-key">${key}</button>`).join("")}
+        ${keys.map(key => {
+          const extra = ["÷", "×", "-", "+", "="].includes(key)
+            ? (key === "=" ? "equal" : "operator")
+            : "";
+          return `<button type="button" class="calc-key ${extra}">${key}</button>`;
+        }).join("")}
       </div>
     </div>
   `;
 }
 
 function renderPaint() {
-  const width = 900;
-  const height = 520;
   return `
     <div class="paint-wrap">
       <div class="paint-toolbar">
         <input type="color" data-color value="#1a73e8" />
         <input type="range" data-size min="1" max="20" value="5" />
-        <button data-clear>清空</button>
+        <button data-clear type="button">清空</button>
       </div>
-      <canvas class="paint-canvas" width="${width}" height="${height}"></canvas>
+      <canvas class="paint-canvas" width="900" height="520"></canvas>
     </div>
   `;
 }
@@ -651,10 +938,9 @@ function renderTerminal() {
 }
 
 function renderMinesweeper() {
-  const size = 9;
   const cells = [];
-  for (let i = 0; i < size * size; i++) {
-    cells.push(`<button class="mine-cell" data-index="${i}"></button>`);
+  for (let i = 0; i < 81; i++) {
+    cells.push(`<button class="mine-cell" data-index="${i}" type="button"></button>`);
   }
 
   return `
@@ -706,22 +992,22 @@ function renderTaskManager() {
 
 function renderCalendar() {
   const weeks = ["日", "一", "二", "三", "四", "五", "六"];
-  const dayCells = [];
+  const cells = [];
   for (let i = 0; i < 42; i++) {
     const isToday = i === 12;
-    dayCells.push(`<div class="calendar-day ${isToday ? "today" : ""}">${i + 1}</div>`);
+    cells.push(`<div class="calendar-day ${isToday ? "today" : ""}">${i + 1}</div>`);
   }
 
   return `
     <div class="calendar">
       <div class="calendar-head">
-        <button>‹</button>
+        <button type="button">‹</button>
         <strong>2026 年 11 月</strong>
-        <button>›</button>
+        <button type="button">›</button>
       </div>
       <div class="calendar-grid">
         ${weeks.map(day => `<div class="calendar-weekday">${day}</div>`).join("")}
-        ${dayCells.join("")}
+        ${cells.join("")}
       </div>
     </div>
   `;
@@ -761,17 +1047,19 @@ function renderSettings() {
         <div class="setting-card">
           <h3>外观</h3>
           <p>切换深色或浅色主题，适应不同工作环境。</p>
-          <button>深色模式</button>
+          <button data-theme-toggle type="button">
+            ${state.darkMode ? "浅色模式" : "深色模式"}
+          </button>
         </div>
         <div class="setting-card">
           <h3>系统</h3>
           <p>管理应用、存储空间与通知设置。</p>
-          <button>打开设置</button>
+          <button type="button">打开设置</button>
         </div>
         <div class="setting-card">
           <h3>更新</h3>
           <p>检查系统更新并安装最新补丁。</p>
-          <button>检查更新</button>
+          <button type="button">检查更新</button>
         </div>
       </div>
     </div>
@@ -794,8 +1082,8 @@ function renderAbout() {
   return `
     <div class="about">
       <div class="about-card">
-        <h2>Windows Web</h2>
-        <p>这是一个简化版的 Windows 风格网页桌面，旨在展示桌面应用和窗口系统的交互模型。</p>
+        <h2>Windows Web Pro</h2>
+        <p>这是一个增强版的 Windows 风格网页桌面，保留原有交互体验，同时补齐了文件管理与应用操作的完整闭环。</p>
         <p>支持：桌面图标、开始菜单、任务栏、窗口管理、资源管理器、浏览器、记事本、计算器和终端。</p>
         <p>技术栈：HTML + CSS + JavaScript</p>
       </div>
