@@ -1,2450 +1,1263 @@
-(() => {
-  "use strict";
+const state = {
+  windows: new Map(),
+  zIndex: 100,
+  notifications: [],
+  toastTimer: null,
+  dragState: null,
+  clipboard: { mode: "none", nodeId: null },
+  darkMode: false
+};
 
-  const $ = (selector, root = document) => root.querySelector(selector);
-  const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+document.addEventListener("DOMContentLoaded", () => {
+  state.darkMode = localStorage.getItem("windows-web-theme") === "dark";
+  applyTheme();
+  renderDesktop();
+  renderAppGrid();
+  renderTaskbar();
+  bindGlobalEvents();
+  updateClock();
+  setInterval(updateClock, 1000);
+  openApp("explorer");
+});
 
-  const FS_KEY = "windows-web-files-v1";
-  const TRASH_KEY = "windows-web-trash-v1";
-  const SETTINGS_KEY = "windows-web-settings-v1";
+function escapeHTML(value) {
+  return String(value ?? "").replace(/[&<>"']/g, char => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[char]);
+}
 
-  const APPS = {
-    explorer: { title: "文件资源管理器", icon: "📂" },
-    browser: { title: "浏览器", icon: "🌐" },
-    notepad: { title: "记事本", icon: "📄" },
-    calculator: { title: "计算器", icon: "🧮" },
-    paint: { title: "画图", icon: "🎨" },
-    terminal: { title: "终端", icon: "⌨️" },
-    minesweeper: { title: "扫雷", icon: "💣" },
-    calendar: { title: "日历", icon: "📅" },
-    media: { title: "音乐播放器", icon: "🎵" },
-    taskmgr: { title: "任务管理器", icon: "📊" },
-    settings: { title: "设置", icon: "⚙️" },
-    trash: { title: "回收站", icon: "🗑️" },
-    photos: { title: "照片查看器", icon: "🖼️" },
-    about: { title: "关于 Windows Web", icon: "ℹ️" }
-  };
+function applyTheme() {
+  document.body.classList.toggle("dark", state.darkMode);
+  localStorage.setItem("windows-web-theme", state.darkMode ? "dark" : "light");
+}
 
-  const BOOKMARKS = [
-    { icon: "🚪", name: "后室游戏", url: "https://soolinejiang.github.io/backroom/" },
-    { icon: "🏫", name: "班级网站", url: "http://soolinesauce.dpdns.org/" },
-    { icon: "⛅", name: "天气预报", url: "https://soolinejiang.github.io/tqyb/" },
-    { icon: "🌟", name: "soolineの个人站", url: "https://cnman.gt.tc" }
-  ];
+function notify(msg) {
+  const toast = document.getElementById("toast");
+  if (!toast) return;
 
-  const windows = new Map();
-  const settings = loadJSON(SETTINGS_KEY, { dark: false, wallpaper: "blue" });
+  toast.textContent = msg;
+  toast.classList.add("show");
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(() => {
+    toast.classList.remove("show");
+  }, 2000);
+}
 
-  let fs = loadJSON(FS_KEY, null);
-  let trash = loadJSON(TRASH_KEY, []);
-  let clipboard = null;
-  let zIndex = 100;
-  let toastTimer = null;
-  let contextState = null;
+function addNotification(msg) {
+  state.notifications.unshift(String(msg));
+  const card = document.getElementById("notificationCard");
+  if (!card) return;
+  card.innerHTML = "";
+  state.notifications.slice(0, 6).forEach(item => {
+    const row = document.createElement("div");
+    row.textContent = item;
+    card.appendChild(row);
+  });
+}
 
-  if (!isValidFolder(fs)) fs = createInitialFS();
-  if (!Array.isArray(trash)) trash = [];
+function clearNotifications() {
+  state.notifications = [];
+  const card = document.getElementById("notificationCard");
+  if (card) card.innerHTML = "暂无通知";
+}
 
-  document.addEventListener("DOMContentLoaded", init);
+function renderDesktop() {
+  const desktop = document.getElementById("desktop");
+  if (!desktop) return;
 
-  function init() {
-    applySettings();
-    renderDesktop();
-    renderAppGrid();
-    bindGlobalEvents();
-    updateClock();
-    window.setInterval(updateClock, 1000);
-    openApp("explorer");
-  }
+  desktop.innerHTML = "";
 
-  function loadJSON(key, fallback) {
-    try {
-      const raw = localStorage.getItem(key);
-      return raw ? JSON.parse(raw) : fallback;
-    } catch {
-      return fallback;
-    }
-  }
+  // 先渲染文件系统图标
+  const items = fs.children || [];
+  items.forEach(item => {
+    const node = document.createElement("div");
+    node.className = "desktop-icon";
+    node.dataset.nodeId = item.id;
 
-  function save() {
-    try {
-      localStorage.setItem(FS_KEY, JSON.stringify(fs));
-      localStorage.setItem(TRASH_KEY, JSON.stringify(trash));
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-    } catch {
-      notify("浏览器存储空间不足，无法保存更改");
-    }
-  }
+    const icon = document.createElement("div");
+    icon.className = "icon";
+    icon.textContent = item.type === "folder" ? "📁" : "📄";
 
-  function isValidFolder(node) {
-    return Boolean(
-      node &&
-      node.type === "folder" &&
-      Array.isArray(node.children)
-    );
-  }
+    const name = document.createElement("div");
+    name.textContent = item.name;
 
-  function makeId() {
-    return "f" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-  }
+    node.appendChild(icon);
+    node.appendChild(name);
 
-  function folder(name, children = []) {
-    return { id: makeId(), name, type: "folder", children };
-  }
-
-  function file(name, content = "") {
-    return { id: makeId(), name, type: "file", content };
-  }
-
-  function createInitialFS() {
-    return folder("此电脑", [
-      folder("桌面", [
-        folder("新建文件夹"),
-        file("欢迎使用.txt", "欢迎使用 Windows Web 桌面！\n\n你可以在桌面创建文件和文件夹。")
-      ]),
-      folder("文档", [
-        file("说明.txt", "这是 Windows Web 桌面的文档目录。")
-      ]),
-      folder("下载"),
-      folder("图片"),
-      folder("音乐"),
-      folder("视频"),
-      folder("本地磁盘 (C:)"),
-      folder("本地磁盘 (D:)")
-    ]);
-  }
-
-  function escapeHTML(value) {
-    return String(value ?? "").replace(/[&<>"']/g, char => ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;"
-    })[char]);
-  }
-
-  function findNode(nodeId, node = fs) {
-    if (!node) return null;
-    if (node.id === nodeId) return node;
-
-    if (node.type === "folder") {
-      for (const child of node.children || []) {
-        const found = findNode(nodeId, child);
-        if (found) return found;
+    node.addEventListener("dblclick", () => {
+      if (item.type === "folder") {
+        openApp("explorer", { nodeId: item.id });
+      } else {
+        openApp("notepad", { fileId: item.id });
       }
-    }
+    });
 
-    return null;
-  }
+    desktop.appendChild(node);
+  });
 
-  function findParent(nodeId, node = fs) {
-    if (!node || node.type !== "folder") return null;
+  // 再渲染所有应用桌面快捷方式
+  Object.entries(APPS).forEach(([key, app]) => {
+    const iconEl = document.createElement("div");
+    iconEl.className = "desktop-icon";
+    iconEl.dataset.appLaunch = key;
+    iconEl.title = `双击打开 ${app.title}`;
 
-    for (const child of node.children || []) {
-      if (child.id === nodeId) return node;
-      const found = findParent(nodeId, child);
-      if (found) return found;
-    }
+    const icon = document.createElement("div");
+    icon.className = "icon";
+    icon.textContent = app.icon;
 
-    return null;
-  }
+    const name = document.createElement("div");
+    name.textContent = app.title;
 
-  function getDesktopFolder() {
-    return fs.children.find(item =>
-      item.type === "folder" && item.name === "桌面"
-    ) || fs;
-  }
+    iconEl.appendChild(icon);
+    iconEl.appendChild(name);
 
-  function getIcon(node) {
-    if (node.type === "folder") return "📁";
-    if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(node.name)) return "🖼️";
-    if (/\.txt$/i.test(node.name)) return "📄";
-    return "📃";
-  }
+    iconEl.addEventListener("dblclick", () => openApp(key));
+    desktop.appendChild(iconEl);
+  });
+}
 
-  function applySettings() {
-    document.body.classList.toggle("dark", Boolean(settings.dark));
-    document.body.classList.remove("wall-purple", "wall-green");
+function renderAppGrid() {
+  const container = document.getElementById("appGrid");
+  if (!container) return;
 
-    if (settings.wallpaper === "purple") {
-      document.body.classList.add("wall-purple");
-    } else if (settings.wallpaper === "green") {
-      document.body.classList.add("wall-green");
-    }
-  }
-
-  function notify(message) {
-    const toast = $("#toast");
-    if (!toast) return;
-
-    toast.textContent = message;
-    toast.classList.add("show");
-    clearTimeout(toastTimer);
-
-    toastTimer = window.setTimeout(() => {
-      toast.classList.remove("show");
-    }, 2300);
-  }
-
-  function renderDesktop() {
-    const desktop = $("#desktop");
-    if (!desktop) return;
-
-    const appIcons = Object.entries(APPS).map(([name, app]) => `
-      <div class="desktop-icon" data-app-icon="${escapeHTML(name)}" title="双击打开${escapeHTML(app.title)}">
-        <span class="icon">${escapeHTML(app.icon)}</span>
-        <span>${escapeHTML(app.title)}</span>
-      </div>
-    `).join("");
-
-    const fileIcons = (getDesktopFolder().children || []).map(node => `
-      <div class="desktop-icon" data-node-id="${escapeHTML(node.id)}" title="${escapeHTML(node.name)}">
-        <span class="icon">${getIcon(node)}</span>
-        <span>${escapeHTML(node.name)}</span>
-      </div>
-    `).join("");
-
-    desktop.innerHTML = appIcons + fileIcons;
-  }
-
-  function renderAppGrid() {
-    const grid = $("#appGrid");
-    if (!grid) return;
-
-    grid.innerHTML = Object.entries(APPS).map(([name, app]) => `
-      <button
-        class="app-item"
-        data-app-launch="${escapeHTML(name)}"
-        data-name="${escapeHTML(app.title)}"
-        type="button">
-        <span class="icon">${escapeHTML(app.icon)}</span>
-        <span>${escapeHTML(app.title)}</span>
+  container.innerHTML = Object.entries(APPS)
+    .map(([key, app]) => `
+      <button class="app-card" data-launch="${key}" type="button">
+        <span class="icon">${app.icon}</span>
+        <span class="name">${app.title}</span>
       </button>
-    `).join("");
-  }
+    `)
+    .join("");
+}
 
-  function renderTaskbar() {
-    const container = $("#taskButtons");
-    if (!container) return;
+function renderTaskbar() {
+  const container = document.getElementById("taskButtons");
+  if (!container) return;
 
-    const focusedApp = $(".window.focused")?.dataset.app;
+  const apps = [...state.windows.keys()];
+  const focusedApp = document.querySelector(".window.focused")?.dataset.app;
 
-    container.innerHTML = [...windows.keys()].map(name => {
-      const app = APPS[name];
+  container.innerHTML = apps
+    .map(appName => {
+      const app = APPS[appName];
       if (!app) return "";
-
       return `
-        <button class="task-btn ${name === focusedApp ? "active" : ""}"
-                data-task-app="${escapeHTML(name)}"
-                type="button"
-                title="${escapeHTML(app.title)}">
-          <span>${escapeHTML(app.icon)}</span>
-          <span class="title">${escapeHTML(app.title)}</span>
+        <button
+          class="task-btn ${appName === focusedApp ? "active" : ""}"
+          data-task-app="${appName}"
+          type="button"
+        >
+          <span>${app.icon}</span>
+          <span class="title">${app.title}</span>
         </button>
       `;
-    }).join("");
-
-    $$("[data-launch]").forEach(button => {
-      const win = windows.get(button.dataset.launch);
-      button.classList.toggle("open", Boolean(win));
-      button.classList.toggle("active", Boolean(win && !win.classList.contains("minimized")));
-    });
-  }
-
-  function bindGlobalEvents() {
-    $("#startButton")?.addEventListener("click", event => {
-      event.stopPropagation();
-      const startMenu = $("#startMenu");
-      const shouldShow = !startMenu.classList.contains("show");
-
-      closePanels();
-      startMenu.classList.toggle("show", shouldShow);
-    });
-
-    $("#quickButton")?.addEventListener("click", event => {
-      event.stopPropagation();
-      const panel = $("#quickPanel");
-      const shouldShow = !panel.classList.contains("show");
-
-      closePanels();
-      panel.classList.toggle("show", shouldShow);
-    });
-
-    $("#clockButton")?.addEventListener("click", event => {
-      event.stopPropagation();
-      const panel = $("#notifications");
-      const shouldShow = !panel.classList.contains("show");
-
-      closePanels();
-      panel.classList.toggle("show", shouldShow);
-    });
-
-    $("#taskSearch")?.addEventListener("click", () => {
-      closePanels();
-      $("#startMenu").classList.add("show");
-      $("#startSearch")?.focus();
-    });
-
-    $("#startSearch")?.addEventListener("input", event => {
-      const query = event.target.value.trim().toLowerCase();
-
-      $$(".app-item").forEach(item => {
-        item.style.display = item.dataset.name.toLowerCase().includes(query)
-          ? ""
-          : "none";
-      });
-    });
-
-    $("#taskSearchInput")?.addEventListener("input", event => {
-      const query = event.target.value.trim().toLowerCase();
-
-      $$(".app-item").forEach(item => {
-        item.style.display = item.dataset.name.toLowerCase().includes(query)
-          ? ""
-          : "none";
-      });
-
-      closePanels();
-      $("#startMenu").classList.add("show");
-    });
-
-    $("#allApps")?.addEventListener("click", () => {
-      $("#startSearch").value = "";
-      $$(".app-item").forEach(item => item.style.display = "");
-      $("#startSearch").focus();
-    });
-
-    $("#clearNotifications")?.addEventListener("click", () => {
-      $("#notificationCard").textContent = "没有新的通知。";
-    });
-
-    $("#powerButton")?.addEventListener("click", () => {
-      notify("这是网页模拟器，不能真的关机");
-    });
-
-    $("#quickPanel")?.addEventListener("click", event => {
-      const tile = event.target.closest(".quick-tile");
-      if (tile) tile.classList.toggle("on");
-    });
-
-    $("#appGrid")?.addEventListener("click", event => {
-      const button = event.target.closest("[data-app-launch]");
-      if (!button) return;
-      openApp(button.dataset.appLaunch);
-    });
-
-    $("#desktop")?.addEventListener("click", event => {
-      const icon = event.target.closest(".desktop-icon");
-
-      $$(".desktop-icon.selected").forEach(item => {
-        item.classList.remove("selected");
-      });
-
-      if (icon) icon.classList.add("selected");
-    });
-
-    $("#desktop")?.addEventListener("dblclick", event => {
-      const icon = event.target.closest(".desktop-icon");
-      if (!icon) return;
-
-      if (icon.dataset.appIcon) {
-        openApp(icon.dataset.appIcon);
-      } else if (icon.dataset.nodeId) {
-        openNode(icon.dataset.nodeId);
-      }
-    });
-
-    document.addEventListener("click", event => {
-      const contextButton = event.target.closest("[data-context-action]");
-      if (contextButton) {
-        handleContextAction(contextButton.dataset.contextAction);
-        return;
-      }
-
-      const appButton = event.target.closest("[data-app-launch]");
-      if (appButton) {
-        openApp(appButton.dataset.appLaunch);
-        return;
-      }
-
-      const taskButton = event.target.closest("[data-task-app]");
-      if (taskButton) {
-        const win = windows.get(taskButton.dataset.taskApp);
-        if (win) {
-          win.classList.remove("minimized");
-          win.classList.add("show");
-          focusWindow(win);
-        }
-        return;
-      }
-
-      if (!event.target.closest(".context-menu")) {
-        $("#contextMenu")?.classList.remove("show");
-      }
-
-      if (!event.target.closest("#startMenu") &&
-          !event.target.closest("#startButton") &&
-          !event.target.closest("#taskSearch")) {
-        $("#startMenu")?.classList.remove("show");
-      }
-
-      if (!event.target.closest("#quickPanel") &&
-          !event.target.closest("#quickButton")) {
-        $("#quickPanel")?.classList.remove("show");
-      }
-
-      if (!event.target.closest("#notifications") &&
-          !event.target.closest("#clockButton")) {
-        $("#notifications")?.classList.remove("show");
-      }
-    });
-
-    document.addEventListener("contextmenu", event => {
-      const fileItem = event.target.closest("[data-node-id]");
-      if (fileItem) {
-        event.preventDefault();
-        showNodeContextMenu(fileItem.dataset.nodeId, event.clientX, event.clientY);
-        return;
-      }
-
-      if (event.target.closest("#desktop")) {
-        event.preventDefault();
-        showDesktopContextMenu(event.clientX, event.clientY);
-      }
-    });
-
-    document.addEventListener("keydown", event => {
-      if (event.key === "Escape") closePanels();
-
-      if (event.key === "Enter" && event.target === $("#startSearch")) {
-        const first = $$(".app-item").find(item => item.style.display !== "none");
-        if (first) openApp(first.dataset.appLaunch);
-      }
-
-      if (event.key === "Delete") {
-        const win = $(".window.focused");
-        if (win?.dataset.selectedFile) {
-          deleteNodeToTrash(win.dataset.selectedFile);
-          renderAllFileViews();
-        }
-      }
-
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
-        const selected = $(".window.focused")?.dataset.selectedFile;
-        if (selected) setClipboard(selected, "copy");
-      }
-
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "x") {
-        const selected = $(".window.focused")?.dataset.selectedFile;
-        if (selected) setClipboard(selected, "cut");
-      }
-
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
-        const win = $(".window.focused");
-        if (win?.dataset.app === "explorer") {
-          pasteInto(win.dataset.folderId || fs.id);
-        }
-      }
-    });
-  }
-
-  function closePanels() {
-    $$(".panel").forEach(panel => panel.classList.remove("show"));
-    $("#contextMenu")?.classList.remove("show");
-  }
-
-  function showMenu(html, x, y) {
-    const menu = $("#contextMenu");
-    if (!menu) return;
-
-    menu.innerHTML = html;
-    menu.classList.add("show");
-
-    requestAnimationFrame(() => {
-      const rect = menu.getBoundingClientRect();
-      menu.style.left = `${Math.max(4, Math.min(x, innerWidth - rect.width - 4))}px`;
-      menu.style.top = `${Math.max(4, Math.min(y, innerHeight - rect.height - 4))}px`;
-    });
-  }
-
-  function showDesktopContextMenu(x, y) {
-    contextState = { type: "desktop" };
-
-    const pasteButton = clipboard
-      ? `<button type="button" data-context-action="paste">粘贴</button>`
-      : "";
-
-    showMenu(`
-      <button type="button" data-context-action="new-folder">新建文件夹</button>
-      <button type="button" data-context-action="new-file">新建文本文件</button>
-      ${pasteButton}
-      <div class="separator"></div>
-      <button type="button" data-context-action="refresh">刷新桌面</button>
-    `, x, y);
-  }
-
-  function showNodeContextMenu(nodeId, x, y) {
-    const node = findNode(nodeId);
-    if (!node) return;
-
-    contextState = { type: "node", nodeId };
-
-    const pasteButton = node.type === "folder" && clipboard
-      ? `<button type="button" data-context-action="paste">粘贴到此文件夹</button>`
-      : "";
-
-    showMenu(`
-      <button type="button" data-context-action="open">打开</button>
-      <button type="button" data-context-action="rename">重命名</button>
-      <button type="button" data-context-action="copy">复制</button>
-      <button type="button" data-context-action="cut">剪切</button>
-      <button type="button" data-context-action="delete">删除</button>
-      ${pasteButton}
-    `, x, y);
-  }
-
-  function handleContextAction(action) {
-    $("#contextMenu")?.classList.remove("show");
-
-    const nodeId = contextState?.nodeId;
-    const node = nodeId ? findNode(nodeId) : null;
-
-    switch (action) {
-      case "new-folder":
-      case "new-file": {
-        const isFolder = action === "new-folder";
-        const defaultName = isFolder ? "新建文件夹" : "新建文件.txt";
-        const name = prompt(isFolder ? "文件夹名称：" : "文件名：", defaultName);
-        if (!name?.trim()) return;
-
-        const created = createNode(
-          getDesktopFolder().id,
-          isFolder ? "folder" : "file",
-          name.trim()
-        );
-
-        if (created) {
-          save();
-          renderAllFileViews();
-          notify(isFolder ? "文件夹已创建" : "文件已创建");
-        }
-        break;
-      }
-
-      case "refresh":
-        renderAllFileViews();
-        notify("桌面已刷新");
-        break;
-
-      case "open":
-        if (node) openNode(node.id);
-        break;
-
-      case "rename":
-        if (node) renameNodeByPrompt(node);
-        break;
-
-      case "copy":
-        if (node) setClipboard(node.id, "copy");
-        break;
-
-      case "cut":
-        if (node) setClipboard(node.id, "cut");
-        break;
-
-      case "delete":
-        if (node && confirm(`确定删除“${node.name}”吗？`)) {
-          deleteNodeToTrash(node.id);
-          renderAllFileViews();
-          notify("已移到回收站");
-        }
-        break;
-
-      case "paste": {
-        let targetId = getDesktopFolder().id;
-        if (contextState?.type === "node" && node?.type === "folder") {
-          targetId = node.id;
-        }
-        pasteInto(targetId);
-        break;
-      }
-
-      default:
-        break;
-    }
-
-    contextState = null;
-  }
-
-  function createNode(parentId, type, name, content = "") {
-    const parent = findNode(parentId);
-    const cleanName = String(name || "").trim();
-
-    if (!parent || parent.type !== "folder" || !cleanName) return null;
-    if (parent.children.some(item => item.name.toLowerCase() === cleanName.toLowerCase())) {
-      notify("该位置已经存在同名项目");
-      return null;
-    }
-
-    const node = type === "folder" ? folder(cleanName) : file(cleanName, content);
-    parent.children.push(node);
-    return node;
-  }
-
-  function renameNodeByPrompt(node) {
-    const parent = findParent(node.id);
-    if (!parent) return;
-
-    const name = prompt("请输入新名称：", node.name);
-    if (name === null) return;
-
-    const cleanName = name.trim();
-    if (!cleanName) return notify("名称不能为空");
-
-    if (parent.children.some(item =>
-      item.id !== node.id && item.name.toLowerCase() === cleanName.toLowerCase()
-    )) {
-      return notify("该目录中已有同名项目");
-    }
-
-    node.name = cleanName;
-    save();
-    renderAllFileViews();
-    notify("已重命名");
-  }
-
-  function deleteNodeToTrash(nodeId) {
-    const parent = findParent(nodeId);
-    if (!parent) return false;
-
-    const index = parent.children.findIndex(item => item.id === nodeId);
-    if (index < 0) return false;
-
-    const [node] = parent.children.splice(index, 1);
-    trash.push({ node, parentId: parent.id, deletedAt: Date.now() });
-    save();
-    return true;
-  }
-
-  function setClipboard(nodeId, mode) {
-    if (!findNode(nodeId)) return;
-    clipboard = { nodeId, mode };
-    notify(mode === "copy" ? "已复制" : "已剪切");
-  }
-
-  function pasteInto(targetId) {
-    if (!clipboard) return notify("剪贴板为空");
-
-    const source = findNode(clipboard.nodeId);
-    const target = findNode(targetId);
-
-    if (!source || !target || target.type !== "folder") {
-      clipboard = null;
-      return notify("无法粘贴到此位置");
-    }
-
-    if (source.id === target.id || (source.type === "folder" && containsNode(source, target.id))) {
-      return notify("不能将文件夹粘贴到自身或其子文件夹中");
-    }
-
-    if (target.children.some(item => item.name.toLowerCase() === source.name.toLowerCase())) {
-      return notify("目标文件夹中已有同名项目");
-    }
-
-    if (clipboard.mode === "cut") {
-      const parent = findParent(source.id);
-      if (!parent) return;
-      parent.children = parent.children.filter(item => item.id !== source.id);
-      target.children.push(source);
-    } else {
-      target.children.push(cloneNode(source));
-    }
-
-    clipboard = null;
-    save();
-    renderAllFileViews();
-    notify("已粘贴");
-  }
-
-  function containsNode(root, targetId) {
-    if (root.id === targetId) return true;
-    return root.type === "folder" &&
-      root.children.some(child => containsNode(child, targetId));
-  }
-
-  function cloneNode(node) {
-    const copy = { ...node, id: makeId() };
-    if (node.type === "folder") copy.children = node.children.map(cloneNode);
-    return copy;
-  }
-
-  function restoreTrashItem(nodeId) {
-    const index = trash.findIndex(entry => entry.node.id === nodeId);
-    if (index < 0) return false;
-
-    const entry = trash[index];
-    let parent = findNode(entry.parentId);
-    if (!parent || parent.type !== "folder") parent = getDesktopFolder();
-
-    if (parent.children.some(item => item.name.toLowerCase() === entry.node.name.toLowerCase())) {
-      entry.node.name = `恢复的 ${entry.node.name}`;
-    }
-
-    parent.children.push(entry.node);
-    trash.splice(index, 1);
-    save();
-    renderAllFileViews();
-    notify("文件已还原");
-    return true;
-  }
-
-  function emptyTrash() {
-    if (!trash.length) return notify("回收站已经是空的");
-    if (!confirm("确定永久删除回收站中的所有项目吗？")) return;
-
-    trash = [];
-    save();
-    renderAllFileViews();
-    notify("回收站已清空");
-  }
-
-  function renderAllFileViews() {
-    renderDesktop();
-
-    for (const win of windows.values()) {
-      if (win.dataset.app === "explorer") renderExplorer(win);
-      if (win.dataset.app === "trash") renderTrash(win);
-    }
-  }
-
-  function openNode(nodeId) {
-    const node = findNode(nodeId);
-    if (!node) return;
-
-    if (node.type === "folder") {
-      openApp("explorer", { folderId: node.id });
-    } else if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(node.name)) {
-      openApp("photos", { fileId: node.id });
-    } else {
-      openApp("notepad", { fileId: node.id });
-    }
-  }
-
-  function createWindow(appName) {
-    const app = APPS[appName];
-    const win = document.createElement("section");
-
-    win.className = "window show";
-    win.dataset.app = appName;
-    win.style.top = `${65 + windows.size * 18}px`;
-    win.style.left = `calc(50% + ${Math.min(windows.size * 14, 70)}px)`;
-    win.style.zIndex = String(++zIndex);
-
-    win.innerHTML = `
-      <header class="titlebar">
-        <div class="window-title">
-          <span>${escapeHTML(app.icon)}</span>
-          <span>${escapeHTML(app.title)}</span>
-        </div>
-        <div class="window-controls">
-          <button data-window-action="minimize" title="最小化" type="button">—</button>
-          <button data-window-action="maximize" title="最大化" type="button">□</button>
-          <button class="close" data-window-action="close" title="关闭" type="button">×</button>
-        </div>
-      </header>
-      <div class="window-content"></div>
-    `;
-
-    document.body.appendChild(win);
-    windows.set(appName, win);
-    bindWindow(win);
-
-    return win;
-  }
-
-  function openApp(appName, options = {}) {
-    if (!APPS[appName]) return;
-
+    })
+    .join("");
+}
+
+function bindGlobalEvents() {
+  document.getElementById("startButton")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const menu = document.getElementById("startMenu");
+    const shouldShow = !menu.classList.contains("show");
     closePanels();
+    if (menu) menu.classList.toggle("show", shouldShow);
+  });
 
-    let win = windows.get(appName);
-    if (!win) {
-      win = createWindow(appName);
-      renderWindowContent(win);
-    } else {
-      win.classList.remove("minimized");
-      win.classList.add("show");
-    }
+  document.getElementById("allAppsBtn")?.addEventListener("click", () => {
+    const menu = document.getElementById("startMenu");
+    const input = document.getElementById("startSearch");
+    if (menu) menu.classList.add("show");
+    if (input) input.focus();
+  });
 
-    if (appName === "explorer" && options.folderId) {
-      showFolder(win, options.folderId);
-    } else if (appName === "notepad" && options.fileId) {
-      loadTextFile(win, options.fileId);
-    } else if (appName === "photos" && options.fileId) {
-      loadPhoto(win, options.fileId);
-    }
+  document.getElementById("quickButton")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const panel = document.getElementById("notifications");
+    const shouldShow = !panel.classList.contains("show");
+    closePanels();
+    if (panel) panel.classList.toggle("show", shouldShow);
+  });
 
-    focusWindow(win);
-    renderTaskbar();
-  }
+  document.getElementById("clockButton")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const panel = document.getElementById("notifications");
+    const shouldShow = !panel.classList.contains("show");
+    closePanels();
+    if (panel) panel.classList.toggle("show", shouldShow);
+  });
 
-  function closeApp(win) {
-    const appName = win.dataset.app;
+  document.getElementById("clearNotifications")?.addEventListener("click", clearNotifications);
 
-    if (win._taskTimer) clearInterval(win._taskTimer);
-    if (win._mediaStop) win._mediaStop();
-
-    windows.delete(appName);
-    win.remove();
-    renderTaskbar();
-  }
-
-  function focusWindow(win) {
-    $$(".window").forEach(item => item.classList.remove("focused"));
-    win.classList.add("focused");
-    win.style.zIndex = String(++zIndex);
-    renderTaskbar();
-  }
-
-  function toggleMaximize(win) {
-    const maximized = win.classList.toggle("maximized");
-
-    if (!maximized) {
-      win.style.top = win.dataset.restoreTop || "80px";
-      win.style.left = win.dataset.restoreLeft || "50%";
-      win.style.width = win.dataset.restoreWidth || "";
-      win.style.height = win.dataset.restoreHeight || "";
-      win.style.transform = "translateX(-50%)";
-    }
-  }
-
-  function bindWindow(win) {
-    const titlebar = $(".titlebar", win);
-    let dragging = false;
-    let offsetX = 0;
-    let offsetY = 0;
-
-    win.addEventListener("pointerdown", () => focusWindow(win));
-
-    titlebar.addEventListener("pointerdown", event => {
-      if (event.target.closest(".window-controls") || win.classList.contains("maximized")) return;
-
-      dragging = true;
-      const rect = win.getBoundingClientRect();
-
-      offsetX = event.clientX - rect.left;
-      offsetY = event.clientY - rect.top;
-
-      win.style.left = `${rect.left}px`;
-      win.style.top = `${rect.top}px`;
-      win.style.transform = "none";
-
-      titlebar.setPointerCapture(event.pointerId);
+  document.getElementById("taskSearchInput")?.addEventListener("input", (event) => {
+    const q = event.target.value.trim().toLowerCase();
+    const cards = document.querySelectorAll(".app-card");
+    cards.forEach(card => {
+      const text = (card.textContent || "").toLowerCase();
+      card.style.display = text.includes(q) ? "flex" : "none";
     });
+  });
 
-    titlebar.addEventListener("pointermove", event => {
-      if (!dragging) return;
-
-      const maxLeft = Math.max(0, window.innerWidth - 80);
-      const maxTop = Math.max(0, window.innerHeight - 80);
-
-      win.style.left = `${Math.max(0, Math.min(event.clientX - offsetX, maxLeft))}px`;
-      win.style.top = `${Math.max(0, Math.min(event.clientY - offsetY, maxTop))}px`;
+  document.getElementById("startSearch")?.addEventListener("input", (event) => {
+    const q = event.target.value.trim().toLowerCase();
+    const cards = document.querySelectorAll(".app-card");
+    cards.forEach(card => {
+      const text = (card.textContent || "").toLowerCase();
+      card.style.display = text.includes(q) ? "flex" : "none";
     });
+  });
 
-    titlebar.addEventListener("pointerup", () => dragging = false);
-    titlebar.addEventListener("pointercancel", () => dragging = false);
-
-    win.addEventListener("click", event => {
-      const control = event.target.closest("[data-window-action]");
-      if (control) {
-        const action = control.dataset.windowAction;
-
-        if (action === "close") closeApp(win);
-
-        if (action === "minimize") {
-          win.classList.add("minimized");
-          win.classList.remove("focused");
-          renderTaskbar();
-        }
-
-        if (action === "maximize") {
-          if (!win.classList.contains("maximized")) {
-            win.dataset.restoreTop = win.style.top;
-            win.dataset.restoreLeft = win.style.left;
-            win.dataset.restoreWidth = win.style.width;
-            win.dataset.restoreHeight = win.style.height;
-          }
-          toggleMaximize(win);
-        }
-        return;
-      }
-
-      handleWindowClick(win, event);
-    });
-
-    win.addEventListener("dblclick", event => {
-      const item = event.target.closest("[data-file-id]");
-      if (item) openNode(item.dataset.fileId);
-    });
-
-    win.addEventListener("keydown", event => {
-      if (event.target.matches("[data-browser-address]") && event.key === "Enter") {
-        browserNavigate(win, event.target.value);
-      }
-
-      if (event.target.matches("[data-terminal-input]") && event.key === "Enter") {
-        runTerminalCommand(win, event.target.value);
-      }
-    });
-
-    win.addEventListener("input", event => {
-      if (event.target.matches("[data-notepad]")) {
-        const node = findNode(win.dataset.fileId);
-        if (node) {
-          node.content = event.target.value;
-          save();
-        }
-      }
-
-      if (event.target.matches("[data-explorer-search]")) {
-        renderExplorer(win);
-      }
-    });
-
-    win.addEventListener("contextmenu", event => {
-      const cell = event.target.closest("[data-mine-cell]");
-      if (cell && win.dataset.app === "minesweeper") {
-        event.preventDefault();
-        toggleMineFlag(win, Number(cell.dataset.mineCell));
-        return;
-      }
-
-      const item = event.target.closest("[data-file-id]");
-      if (item) {
-        event.preventDefault();
-        contextState = {
-          type: "explorer-item",
-          nodeId: item.dataset.fileId,
-          folderId: win.dataset.folderId || fs.id
-        };
-        showMenu(`
-          <button type="button" data-context-action="open">打开</button>
-          <button type="button" data-context-action="rename">重命名</button>
-          <button type="button" data-context-action="copy">复制</button>
-          <button type="button" data-context-action="cut">剪切</button>
-          <button type="button" data-context-action="delete">删除</button>
-          <button type="button" data-context-action="paste">粘贴到此文件夹</button>
-        `, event.clientX, event.clientY);
-      }
-    });
-
-    if (win.dataset.app === "browser") initBrowser(win);
-    if (win.dataset.app === "paint") initPaint(win);
-    if (win.dataset.app === "minesweeper") initMinesweeper(win);
-    if (win.dataset.app === "calendar") initCalendar(win);
-    if (win.dataset.app === "taskmgr") initTaskManager(win);
-    if (win.dataset.app === "media") initMedia(win);
-    if (win.dataset.app === "explorer") {
-      win.dataset.folderId = fs.id;
-      renderExplorer(win);
-    }
-    if (win.dataset.app === "trash") renderTrash(win);
-    if (win.dataset.app === "terminal") {
-      setTimeout(() => $("[data-terminal-input]", win)?.focus(), 0);
-    }
-  }
-
-  function renderWindowContent(win) {
-    const appName = win.dataset.app;
-    const content = $(".window-content", win);
-    content.innerHTML = getAppContent(appName);
-  }
-
-  function handleWindowClick(win, event) {
-    const appName = win.dataset.app;
-
-    const launch = event.target.closest("[data-open-app]");
-    if (launch) return openApp(launch.dataset.openApp);
-
-    const nav = event.target.closest("[data-location]");
-    if (nav && appName === "explorer") return navigateExplorer(win, nav.dataset.location);
-
-    const command = event.target.closest("[data-explorer-command]");
-    if (command) return explorerCommand(win, command.dataset.explorerCommand);
-
-    const fileItem = event.target.closest("[data-file-id]");
-    if (fileItem && appName === "explorer") {
-      $$(".file-item", win).forEach(item => item.classList.remove("selected"));
-      fileItem.classList.add("selected");
-      win.dataset.selectedFile = fileItem.dataset.fileId;
+  document.addEventListener("click", (event) => {
+    const launch = event.target.closest("[data-launch]");
+    if (launch) {
+      openApp(launch.dataset.launch);
+      document.getElementById("startMenu")?.classList.remove("show");
       return;
     }
 
-    const noteButton = event.target.closest("[data-note-command]");
-    if (noteButton) return notepadCommand(win, noteButton.dataset.noteCommand);
-
-    const calcButton = event.target.closest("[data-calc-key]");
-    if (calcButton) return calculatorKey(win, calcButton.dataset.calcKey);
-
-    const browserButton = event.target.closest("[data-browser-command]");
-    if (browserButton) return browserCommand(win, browserButton.dataset.browserCommand);
-
-    const bookmark = event.target.closest("[data-bookmark-url]");
-    if (bookmark) return browserNavigate(win, bookmark.dataset.bookmarkUrl);
-
-    const paintButton = event.target.closest("[data-paint-command]");
-    if (paintButton) return paintCommand(win, paintButton.dataset.paintCommand);
-
-    const mineRestart = event.target.closest("[data-mine-restart]");
-    if (mineRestart) return initMinesweeper(win);
-
-    const mineCell = event.target.closest("[data-mine-cell]");
-    if (mineCell && appName === "minesweeper") {
-      return openMineCell(win, Number(mineCell.dataset.mineCell));
-    }
-
-    const taskAction = event.target.closest("[data-task-command]");
-    if (taskAction) {
-      if (taskAction.dataset.taskCommand === "refresh") renderTaskManager(win);
-      if (taskAction.dataset.taskCommand === "end") endTask(win);
+    const taskBtn = event.target.closest("[data-task-app]");
+    if (taskBtn) {
+      const appName = taskBtn.dataset.taskApp;
+      const win = state.windows.get(appName);
+      if (win) {
+        win.classList.remove("minimized");
+        win.classList.add("show");
+        focusWindow(win);
+      }
       return;
     }
 
-    const taskRow = event.target.closest("[data-task-app]");
-    if (taskRow) {
-      $$("[data-task-app]", win).forEach(row => row.classList.remove("selected"));
-      taskRow.classList.add("selected");
-      win.dataset.selectedTask = taskRow.dataset.taskApp;
+    const ctxAction = event.target.closest("[data-context-action]");
+    if (ctxAction) {
+      handleContextAction(ctxAction.dataset.contextAction, ctxAction.dataset.nodeId);
       return;
     }
 
-    const calButton = event.target.closest("[data-calendar-command]");
-    if (calButton) {
-      win._monthOffset += calButton.dataset.calendarCommand === "next" ? 1 : -1;
-      renderCalendar(win);
+    if (!event.target.closest(".context-menu") &&
+        !event.target.closest("#desktop") &&
+        !event.target.closest(".desktop-icon")) {
+      document.getElementById("contextMenu")?.classList.remove("show");
+    }
+
+    if (!event.target.closest("#startButton") &&
+        !event.target.closest("#startMenu")) {
+      document.getElementById("startMenu")?.classList.remove("show");
+    }
+
+    if (!event.target.closest("#quickButton") &&
+        !event.target.closest("#notifications")) {
+      document.getElementById("notifications")?.classList.remove("show");
+    }
+  });
+
+  document.addEventListener("contextmenu", (event) => {
+    const desktopTarget = event.target.closest("#desktop");
+    if (desktopTarget) {
+      event.preventDefault();
+      showDesktopContextMenu(event.clientX, event.clientY);
       return;
     }
 
-    const track = event.target.closest("[data-media-track]");
-    if (track) return playTrack(win, Number(track.dataset.mediaTrack));
-
-    if (event.target.closest("[data-media-stop]")) {
-      win._mediaStop?.();
-      return;
+    const nodeItem = event.target.closest("[data-node-id]");
+    if (nodeItem) {
+      event.preventDefault();
+      showNodeContextMenu(nodeItem.dataset.nodeId, event.clientX, event.clientY);
     }
+  });
 
-    const themeButton = event.target.closest("[data-setting-theme]");
-    if (themeButton) return toggleTheme();
+  document.addEventListener("pointerdown", (event) => {
+    const titlebar = event.target.closest(".titlebar");
+    const win = event.target.closest(".window");
+    if (!titlebar || !win || event.target.closest("button")) return;
+    if (win.classList.contains("maximized")) return;
 
-    const wallpaperButton = event.target.closest("[data-wallpaper]");
-    if (wallpaperButton) return setWallpaper(wallpaperButton.dataset.wallpaper);
-
-    const trashButton = event.target.closest("[data-trash-command]");
-    if (trashButton) {
-      if (trashButton.dataset.trashCommand === "empty") emptyTrash();
-      if (trashButton.dataset.trashCommand === "restore") restoreSelectedTrash(win);
-    }
-  }
-
-  function getAppContent(name) {
-    switch (name) {
-      case "explorer":
-        return `
-          <div class="toolbar">
-            <button class="tool" data-explorer-command="up" title="上一级" type="button">↑</button>
-            <div class="address" data-explorer-address>📂 此电脑</div>
-            <input class="address" data-explorer-search placeholder="搜索当前文件夹">
-            <button class="tool" data-explorer-command="new-folder" title="新建文件夹" type="button">📁＋</button>
-            <button class="tool" data-explorer-command="new-file" title="新建文本文件" type="button">📄＋</button>
-            <button class="tool" data-explorer-command="refresh" title="刷新" type="button">⟳</button>
-          </div>
-          <div class="explorer-layout">
-            <aside class="sidebar">
-              <div class="nav-item selected" data-location="root">📂 此电脑</div>
-              <div class="nav-item" data-location="desktop">🖥️ 桌面</div>
-              <div class="nav-item" data-location="documents">📄 文档</div>
-              <div class="nav-item" data-location="downloads">📥 下载</div>
-              <div class="nav-item" data-location="pictures">🖼️ 图片</div>
-              <div class="nav-item" data-location="trash">🗑️ 回收站</div>
-            </aside>
-            <div class="files-area" data-files-area></div>
-          </div>`;
-
-      case "browser":
-        return `
-          <div class="browser-wrap">
-            <div class="toolbar browser-toolbar">
-              <button class="tool" data-browser-command="back" title="后退" type="button">←</button>
-              <button class="tool" data-browser-command="forward" title="前进" type="button">→</button>
-              <button class="tool" data-browser-command="reload" title="刷新" type="button">⟳</button>
-              <button class="tool" data-browser-command="home" title="主页" type="button">🏠</button>
-              <input class="address" data-browser-address placeholder="输入网址，例如 example.com" spellcheck="false">
-              <button class="tool" data-browser-command="go" type="button">前往</button>
-              <button class="tool" data-browser-command="newtab" title="系统浏览器打开" type="button">↗</button>
-            </div>
-            <div class="browser-bookmarks">
-              ${BOOKMARKS.map(item => `
-                <button class="bm-card" type="button" data-bookmark-url="${escapeHTML(item.url)}">
-                  <span class="bm-icon">${escapeHTML(item.icon)}</span>
-                  <span class="bm-name">${escapeHTML(item.name)}</span>
-                </button>
-              `).join("")}
-            </div>
-            <iframe class="browser-frame" data-browser-frame title="浏览器页面" referrerpolicy="no-referrer"></iframe>
-            <div class="browser-tip">部分网站禁止嵌入；若页面空白，可点 ↗ 在系统浏览器打开。</div>
-          </div>`;
-
-      case "notepad":
-        return `
-          <div class="notepad-wrap">
-            <div class="notepad-menu">
-              <button class="tool" data-note-command="new" type="button">新建</button>
-              <button class="tool" data-note-command="save" type="button">保存</button>
-              <span data-note-name>未命名.txt</span>
-            </div>
-            <textarea class="notepad-text" data-notepad spellcheck="false" placeholder="在此处输入文字…"></textarea>
-          </div>`;
-
-      case "calculator":
-        return `
-          <div class="calc">
-            <input class="calc-display" data-calc-display value="0" readonly>
-            <div class="calc-grid">
-              ${["C", "⌫", "%", "÷", "7", "8", "9", "×", "4", "5", "6", "−", "1", "2", "3", "+", "±", "0", ".", "="]
-                .map(key => `<button class="calc-key ${key === "=" ? "equals" : ""}" data-calc-key="${key}" type="button">${key}</button>`)
-                .join("")}
-            </div>
-          </div>`;
-
-      case "paint":
-        return `
-          <div class="paint-wrap">
-            <div class="toolbar paint-controls">
-              <button class="tool" data-paint-command="save" type="button">💾 保存到桌面</button>
-              <button class="tool" data-paint-command="clear" type="button">清空</button>
-              <label>颜色 <input type="color" data-paint-color value="#1a73e8"></label>
-              <label>粗细 <input type="range" data-paint-size min="1" max="40" value="5"></label>
-              <label><input type="checkbox" data-paint-eraser> 橡皮擦</label>
-            </div>
-            <div class="paint-canvas-area">
-              <canvas class="paint-canvas" data-paint-canvas width="640" height="420"></canvas>
-            </div>
-          </div>`;
-
-      case "terminal":
-        return `
-          <div class="terminal">
-            <div class="term-output" data-terminal-output>Windows Web Terminal
-输入 help 查看命令列表。
-</div>
-            <div class="term-row">
-              <span class="term-prompt">C:\\Users\\用户&gt;</span>
-              <input class="term-input" data-terminal-input autocomplete="off" spellcheck="false">
-            </div>
-          </div>`;
-
-      case "minesweeper":
-        return `
-          <div class="mine-wrap">
-            <div class="mine-status">
-              <span data-mine-count>💣 10</span>
-              <button class="tool" data-mine-restart type="button">🙂 重新开始</button>
-              <span data-mine-time>⏱ 0 秒</span>
-            </div>
-            <div class="mine-grid" data-mine-grid></div>
-            <p class="empty">左键翻开 · 右键插旗 · 找出全部 10 颗雷</p>
-          </div>`;
-
-      case "calendar":
-        return `
-          <div class="calendar">
-            <div class="cal-head">
-              <button class="tool" data-calendar-command="prev" type="button">←</button>
-              <b data-calendar-title></b>
-              <button class="tool" data-calendar-command="next" type="button">→</button>
-            </div>
-            <div class="cal-grid" data-calendar-grid></div>
-          </div>`;
-
-      case "media":
-        return `
-          <div class="media">
-            <div class="media-now" data-media-now>
-              <span class="disc">💿</span>
-              <div data-media-title>未在播放</div>
-            </div>
-            <button class="media-track" data-media-track="0" type="button"><span>🎵 小星星</span><span>播放</span></button>
-            <button class="media-track" data-media-track="1" type="button"><span>🎵 欢乐颂</span><span>播放</span></button>
-            <button class="media-track" data-media-track="2" type="button"><span>🎵 简单旋律</span><span>播放</span></button>
-            <button class="media-track" data-media-stop type="button"><span>⏹ 停止</span></button>
-            <p class="empty">使用浏览器 Web Audio 合成声音。</p>
-          </div>`;
-
-      case "taskmgr":
-        return `
-          <div class="taskmgr">
-            <table>
-              <thead><tr><th>应用</th><th>CPU</th><th>内存</th><th>状态</th></tr></thead>
-              <tbody data-task-body></tbody>
-            </table>
-            <div class="taskmgr-actions">
-              <button class="small-button" data-task-command="end" type="button">结束任务</button>
-              <button class="small-button" data-task-command="refresh" type="button">刷新</button>
-            </div>
-          </div>`;
-
-      case "settings":
-        return `
-          <div class="settings">
-            <h2>个性化</h2>
-            <div class="setting-card">
-              <b>明暗模式</b>
-              <p>切换桌面的亮色或暗色主题。</p>
-              <button data-setting-theme type="button">${settings.dark ? "切换到亮色模式" : "切换到暗色模式"}</button>
-            </div>
-            <div class="setting-card">
-              <b>桌面壁纸</b>
-              <p>选择桌面背景颜色主题。</p>
-              <button data-wallpaper="blue" type="button">蓝色</button>
-              <button data-wallpaper="purple" type="button">紫色</button>
-              <button data-wallpaper="green" type="button">绿色</button>
-            </div>
-          </div>`;
-
-      case "trash":
-        return `
-          <div class="toolbar">
-            <button class="tool" data-trash-command="restore" type="button">还原选中项</button>
-            <button class="tool" data-trash-command="empty" type="button">清空回收站</button>
-          </div>
-          <div class="files-area" data-trash-area></div>`;
-
-      case "photos":
-        return `<div class="photo-view"><img data-photo-image alt="图片预览"></div>`;
-
-      case "about":
-      default:
-        return `
-          <div class="settings">
-            <h2>Windows Web 桌面</h2>
-            <p>一个使用 HTML、CSS 和 JavaScript 实现的桌面模拟器。</p>
-            <p>文件保存在当前浏览器的本地存储中。</p>
-            <p>浏览器内嵌页面可能受目标网站的安全策略限制。</p>
-          </div>`;
-    }
-  }
-
-  function renderExplorer(win) {
-    const folderId = win.dataset.folderId || fs.id;
-    let current = findNode(folderId);
-
-    if (!current || current.type !== "folder") {
-      current = fs;
-      win.dataset.folderId = fs.id;
-    }
-
-    const address = $("[data-explorer-address]", win);
-    const area = $("[data-files-area]", win);
-    if (!area) return;
-
-    if (address) address.textContent = `📂 ${current.name}`;
-
-    const search = ($("[data-explorer-search]", win)?.value || "").trim().toLowerCase();
-    const items = (current.children || []).filter(item =>
-      item.name.toLowerCase().includes(search)
-    );
-
-    area.innerHTML = `
-      <h2 class="files-heading">${escapeHTML(current.name)}</h2>
-      ${items.length
-        ? `<div class="file-grid">${items.map(item => `
-            <div class="file-item"
-                 data-file-id="${escapeHTML(item.id)}"
-                 title="${escapeHTML(item.name)}">
-              <span class="icon">${getIcon(item)}</span>
-              ${escapeHTML(item.name)}
-            </div>
-          `).join("")}</div>`
-        : `<p class="empty">此文件夹为空。</p>`}
-    `;
-  }
-
-  function navigateExplorer(win, location) {
-    if (location === "trash") {
-      openApp("trash");
-      return;
-    }
-
-    if (location === "root") {
-      win.dataset.folderId = fs.id;
-      renderExplorer(win);
-      return;
-    }
-
-    const names = {
-      desktop: "桌面",
-      documents: "文档",
-      downloads: "下载",
-      pictures: "图片"
+    state.dragState = {
+      win,
+      offsetX: event.clientX - win.offsetLeft,
+      offsetY: event.clientY - win.offsetTop
     };
+    focusWindow(win);
+  });
 
-    const target = fs.children.find(item =>
-      item.type === "folder" && item.name === names[location]
-    );
+  document.addEventListener("pointermove", (event) => {
+    if (!state.dragState) return;
 
-    if (target) {
-      win.dataset.folderId = target.id;
-      renderExplorer(win);
-    } else {
-      notify("没有找到该文件夹");
+    const { win, offsetX, offsetY } = state.dragState;
+    win.style.left = `${event.clientX - offsetX}px`;
+    win.style.top = `${event.clientY - offsetY}px`;
+    win.style.transform = "none";
+  });
+
+  document.addEventListener("pointerup", () => {
+    state.dragState = null;
+  });
+}
+
+function closePanels() {
+  document.getElementById("startMenu")?.classList.remove("show");
+  document.getElementById("notifications")?.classList.remove("show");
+  document.getElementById("contextMenu")?.classList.remove("show");
+}
+
+function showContextMenuHTML(html, x, y) {
+  const menu = document.getElementById("contextMenu");
+  if (!menu) return;
+
+  menu.innerHTML = html;
+  menu.classList.add("show");
+
+  const width = menu.offsetWidth || 180;
+  const height = menu.offsetHeight || 200;
+
+  menu.style.left = `${Math.min(x, window.innerWidth - width - 8)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - height - 8)}px`;
+}
+
+function showDesktopContextMenu(x, y) {
+  const hasClipboard = state.clipboard.mode !== "none" && state.clipboard.nodeId;
+  showContextMenuHTML(`
+    <button type="button" data-context-action="new-folder">新建文件夹</button>
+    <button type="button" data-context-action="new-file">新建文件</button>
+    ${hasClipboard ? `<button type="button" data-context-action="paste" data-node-id="${fs.id}">粘贴</button>` : ""}
+    <div class="separator"></div>
+    <button type="button" data-context-action="refresh">刷新</button>
+  `, x, y);
+}
+
+function showNodeContextMenu(nodeId, x, y) {
+  const node = findNode(nodeId);
+  if (!node) return;
+  const hasClipboard = state.clipboard.mode !== "none" && state.clipboard.nodeId;
+
+  showContextMenuHTML(`
+    <button type="button" data-context-action="open-node" data-node-id="${nodeId}">
+      ${node.type === "folder" ? "打开" : "打开文件"}
+    </button>
+    <button type="button" data-context-action="rename" data-node-id="${nodeId}">重命名</button>
+    <button type="button" data-context-action="copy" data-node-id="${nodeId}">复制</button>
+    <button type="button" data-context-action="cut" data-node-id="${nodeId}">剪切</button>
+    <button type="button" data-context-action="delete" data-node-id="${nodeId}">删除</button>
+    ${hasClipboard && node.type === "folder" ? `<button type="button" data-context-action="paste" data-node-id="${nodeId}">粘贴到这里</button>` : ""}
+    <div class="separator"></div>
+    <button type="button" data-context-action="refresh">刷新</button>
+  `, x, y);
+}
+
+function handleContextAction(action, nodeId) {
+  document.getElementById("contextMenu")?.classList.remove("show");
+
+  switch (action) {
+    case "refresh":
+      renderDesktop();
+      notify("已刷新桌面");
+      break;
+
+    case "new-folder": {
+      const name = prompt("请输入文件夹名称", "新建文件夹");
+      if (!name || !name.trim()) break;
+      createNode(fs.id, "folder", name.trim());
+      renderDesktop();
+      notify("已创建文件夹");
+      break;
     }
+
+    case "new-file": {
+      const name = prompt("请输入文件名", "新建文件.txt");
+      if (!name || !name.trim()) break;
+      createNode(fs.id, "file", name.trim());
+      renderDesktop();
+      notify("已创建文件");
+      break;
+    }
+
+    case "open-node": {
+      if (!nodeId) break;
+      const node = findNode(nodeId);
+      if (!node) break;
+
+      if (node.type === "folder") {
+        openApp("explorer", { nodeId: node.id });
+      } else {
+        openApp("notepad", { fileId: node.id });
+      }
+      break;
+    }
+
+    case "rename": {
+      if (!nodeId) break;
+      const node = findNode(nodeId);
+      if (!node) break;
+
+      const newName = prompt("请输入新名称", node.name);
+      if (!newName || !newName.trim()) break;
+
+      if (renameNode(nodeId, newName.trim())) {
+        renderDesktop();
+        refreshExplorerWindows();
+        notify("已重命名");
+      }
+      break;
+    }
+
+    case "copy": {
+      if (!nodeId) break;
+      if (!findNode(nodeId)) break;
+
+      state.clipboard = { mode: "copy", nodeId };
+      notify("已复制");
+      break;
+    }
+
+    case "cut": {
+      if (!nodeId) break;
+      if (!findNode(nodeId)) break;
+
+      state.clipboard = { mode: "cut", nodeId };
+      notify("已剪切");
+      break;
+    }
+
+    case "paste": {
+      const targetFolderId = nodeId || fs.id;
+      const targetFolder = findNode(targetFolderId);
+
+      if (!targetFolder || targetFolder.type !== "folder") {
+        notify("目标位置不是文件夹");
+        break;
+      }
+
+      if (!state.clipboard.nodeId) {
+        notify("剪贴板为空");
+        break;
+      }
+
+      const sourceNode = findNode(state.clipboard.nodeId);
+
+      if (!sourceNode) {
+        notify("源文件不存在");
+        break;
+      }
+
+      if (state.clipboard.mode === "copy") {
+        const ok = pasteNodeIntoFolder(state.clipboard.nodeId, targetFolderId);
+        if (ok) {
+          renderDesktop();
+          refreshExplorerWindows();
+          notify("已粘贴");
+        } else {
+          notify("粘贴失败");
+        }
+      } else if (state.clipboard.mode === "cut") {
+        const ok = moveNode(state.clipboard.nodeId, targetFolderId);
+        if (ok) {
+          renderDesktop();
+          refreshExplorerWindows();
+          notify("已移动");
+        } else {
+          notify("移动失败");
+        }
+      }
+
+      state.clipboard = { mode: "none", nodeId: null };
+      break;
+    }
+
+    case "delete": {
+      if (!nodeId) break;
+      if (!confirm("确定删除该项吗？")) break;
+
+      if (deleteNode(nodeId)) {
+        renderDesktop();
+        refreshExplorerWindows();
+        notify("已删除");
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
+}
+
+function refreshExplorerWindows() {
+  state.windows.forEach((win, appName) => {
+    if (appName === "explorer") {
+      const currentId = win.dataset.currentFolder || fs.id;
+      const content = win.querySelector(".window-content");
+      if (content) {
+        content.innerHTML = renderExplorer(currentId);
+        bindAppContentEvents("explorer", win);
+      }
+    }
+  });
+}
+
+function focusWindow(win) {
+  document.querySelectorAll(".window").forEach(el => el.classList.remove("focused"));
+  win.classList.add("focused");
+  win.style.zIndex = ++state.zIndex;
+  renderTaskbar();
+}
+
+function updateClock() {
+  const now = new Date();
+  const time = now.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  const date = now.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
+
+  const timeEl = document.getElementById("clockTime");
+  const dateEl = document.getElementById("clockDate");
+
+  if (timeEl) timeEl.textContent = time;
+  if (dateEl) dateEl.textContent = date;
+}
+
+function openApp(appName, options = {}) {
+  if (!APPS[appName]) return;
+
+  let win = state.windows.get(appName);
+  if (!win) {
+    win = createWindow(appName);
+    state.windows.set(appName, win);
   }
 
-  function explorerCommand(win, command) {
-    const folderId = win.dataset.folderId || fs.id;
-    const current = findNode(folderId);
-
-    if (command === "up") {
-      const parent = findParent(folderId);
-      if (parent) {
-        win.dataset.folderId = parent.id;
-        renderExplorer(win);
-      }
-      return;
-    }
-
-    if (command === "refresh") {
-      renderExplorer(win);
-      return;
-    }
-
-    if (command === "new-folder" || command === "new-file") {
-      const isFolder = command === "new-folder";
-      const name = prompt(isFolder ? "文件夹名称：" : "文件名：", isFolder ? "新建文件夹" : "新建文件.txt");
-      if (!name?.trim()) return;
-
-      const created = createNode(current.id, isFolder ? "folder" : "file", name.trim());
-      if (created) {
-        save();
-        renderAllFileViews();
-        notify(isFolder ? "文件夹已创建" : "文件已创建");
-      }
-    }
+  const content = win.querySelector(".window-content");
+  if (content) {
+    content.innerHTML = renderAppContent(appName, options);
+    bindAppContentEvents(appName, win);
   }
 
-  function renderTrash(win) {
-    const area = $("[data-trash-area]", win);
-    if (!area) return;
+  win.classList.remove("minimized");
+  win.classList.add("show");
+  focusWindow(win);
+  renderTaskbar();
+}
 
-    if (!trash.length) {
-      area.innerHTML = `<p class="empty">回收站为空。</p>`;
-      return;
-    }
+function createWindow(appName) {
+  const win = document.createElement("section");
+  win.className = "window show";
+  win.dataset.app = appName;
 
-    area.innerHTML = `<div class="file-grid">${trash.map(entry => `
-      <div class="file-item" data-trash-id="${escapeHTML(entry.node.id)}">
-        <span class="icon">${getIcon(entry.node)}</span>
-        ${escapeHTML(entry.node.name)}
+  const app = APPS[appName];
+  const total = state.windows.size;
+  win.style.left = `${120 + total * 36}px`;
+  win.style.top = `${70 + total * 22}px`;
+
+  win.innerHTML = `
+    <header class="titlebar">
+      <div class="window-title">
+        <span>${app.icon}</span>
+        <span>${app.title}</span>
       </div>
-    `).join("")}</div>`;
+      <div class="window-controls">
+        <button type="button" data-window="minimize" title="最小化">—</button>
+        <button type="button" data-window="maximize" title="最大化">□</button>
+        <button type="button" class="close" data-window="close" title="关闭">✕</button>
+      </div>
+    </header>
+    <div class="window-content"></div>
+  `;
 
-    $$("[data-trash-id]", win).forEach(item => {
+  document.body.appendChild(win);
+
+  win.querySelectorAll("[data-window]").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+
+      const action = btn.dataset.window;
+      if (action === "close") {
+        win.remove();
+        state.windows.delete(appName);
+        renderTaskbar();
+      }
+
+      if (action === "minimize") {
+        win.classList.add("minimized");
+        renderTaskbar();
+      }
+
+      if (action === "maximize") {
+        win.classList.toggle("maximized");
+      }
+    });
+  });
+
+  return win;
+}
+
+function renderAppContent(appName, options = {}) {
+  switch (appName) {
+    case "explorer":
+      return renderExplorer(options.nodeId || fs.id);
+
+    case "browser":
+      return renderBrowser();
+
+    case "notepad":
+      return renderNotepad(options.fileId);
+
+    case "calculator":
+      return renderCalculator();
+
+    case "paint":
+      return renderPaint();
+
+    case "terminal":
+      return renderTerminal();
+
+    case "minesweeper":
+      return renderMinesweeper();
+
+    case "taskmgr":
+      return renderTaskManager();
+
+    case "calendar":
+      return renderCalendar();
+
+    case "media":
+      return renderMedia();
+
+    case "settings":
+      return renderSettings();
+
+    case "trash":
+      return renderTrash();
+
+    case "about":
+      return renderAbout();
+
+    default:
+      return `<div style="padding:30px;">${APPS[appName]?.title || "应用"}尚未实现</div>`;
+  }
+}
+
+function bindAppContentEvents(appName, win) {
+  const content = win.querySelector(".window-content");
+  if (!content) return;
+
+  if (appName === "explorer") {
+    content.querySelectorAll(".file-item").forEach(item => {
       item.addEventListener("click", () => {
-        $$("[data-trash-id]", win).forEach(other => other.classList.remove("selected"));
-        item.classList.add("selected");
-        win.dataset.selectedTrash = item.dataset.trashId;
+        const nodeId = item.dataset.fileId;
+        const type = item.dataset.fileType;
+        if (type === "folder") {
+          openApp("explorer", { nodeId });
+        } else if (type === "file") {
+          openApp("notepad", { fileId: nodeId });
+        }
       });
+    });
 
-      item.addEventListener("dblclick", () => restoreTrashItem(item.dataset.trashId));
+    content.querySelectorAll("[data-go-back]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const currentId = btn.dataset.current;
+        const current = findNode(currentId);
+        const parent = current ? findParent(currentId) : null;
+        if (parent) openApp("explorer", { nodeId: parent.id });
+      });
+    });
+
+    content.querySelectorAll("[data-go-root]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        openApp("explorer", { nodeId: fs.id });
+      });
     });
   }
 
-  function restoreSelectedTrash(win) {
-    const id = win.dataset.selectedTrash;
-    if (!id) return notify("请先选择回收站项目");
-    restoreTrashItem(id);
+  if (appName === "browser") {
+    const iframe = content.querySelector(".browser-frame");
+    const input = content.querySelector(".address");
+    if (!iframe || !input) return;
+
+    iframe.src = "https://www.bing.com/";
+
+    content.querySelectorAll("[data-browser]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const cmd = btn.dataset.browser;
+        const value = input.value.trim();
+
+        if (cmd === "go" && value) iframe.src = value;
+        if (cmd === "back") iframe.contentWindow?.history.back();
+        if (cmd === "forward") iframe.contentWindow?.history.forward();
+        if (cmd === "home") iframe.src = "https://www.bing.com/";
+      });
+    });
+
+    content.querySelectorAll(".bm-card").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const url = btn.dataset.url;
+        if (url) iframe.src = url;
+      });
+    });
   }
 
-  function restoreTrashItem(nodeId) {
-    const index = trash.findIndex(entry => entry.node.id === nodeId);
-    if (index < 0) return;
+  if (appName === "calculator") {
+    content.querySelectorAll(".calc-key").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const display = content.querySelector(".calc-display");
+        const value = btn.textContent.trim();
 
-    const entry = trash[index];
-    let parent = findNode(entry.parentId);
-    if (!parent || parent.type !== "folder") parent = getDesktopFolder();
+        if (!display) return;
 
-    if (parent.children.some(item => item.name.toLowerCase() === entry.node.name.toLowerCase())) {
-      entry.node.name = `恢复的 ${entry.node.name}`;
-    }
-
-    parent.children.push(entry.node);
-    trash.splice(index, 1);
-    save();
-    renderAllFileViews();
-    notify("项目已还原");
-  }
-
-  function emptyTrash() {
-    if (!trash.length) return notify("回收站已经是空的");
-    if (!confirm("确定永久删除回收站中的所有项目吗？")) return;
-
-    trash = [];
-    save();
-    renderAllFileViews();
-    notify("回收站已清空");
-  }
-
-  function loadTextFile(win, fileId) {
-    const node = findNode(fileId);
-    if (!node || node.type !== "file") return;
-
-    win.dataset.fileId = node.id;
-    const textarea = $("[data-notepad]", win);
-    const name = $("[data-note-name]", win);
-
-    if (textarea) textarea.value = node.content || "";
-    if (name) name.textContent = node.name;
-  }
-
-  function loadPhoto(win, fileId) {
-    const node = findNode(fileId);
-    if (!node || node.type !== "file") return;
-
-    const image = $("[data-photo-image]", win);
-    if (image) image.src = node.content || "";
-  }
-
-  function notepadCommand(win, command) {
-    const textarea = $("[data-notepad]", win);
-    const nameLabel = $("[data-note-name]", win);
-    if (!textarea) return;
-
-    if (command === "new") {
-      win.dataset.fileId = "";
-      textarea.value = "";
-      if (nameLabel) nameLabel.textContent = "未命名.txt";
-      textarea.focus();
-      return;
-    }
-
-    if (command === "save") {
-      let node = findNode(win.dataset.fileId);
-
-      if (!node) {
-        const name = prompt("保存文件名：", "新建文档.txt");
-        if (!name?.trim()) return;
-
-        node = createNode(getDesktopFolder().id, "file", name.trim(), textarea.value);
-        if (!node) return;
-
-        win.dataset.fileId = node.id;
-      } else {
-        node.content = textarea.value;
-      }
-
-      if (nameLabel) nameLabel.textContent = node.name;
-      save();
-      renderAllFileViews();
-      notify("文件已保存到桌面");
-    }
-  }
-
-  function calculatorKey(win, key) {
-    const display = $("[data-calc-display]", win);
-    if (!display) return;
-
-    let expression = display.dataset.expression || "";
-
-    if (key === "C") {
-      display.dataset.expression = "";
-      display.value = "0";
-      return;
-    }
-
-    if (key === "⌫") {
-      expression = expression.slice(0, -1);
-      display.dataset.expression = expression;
-      display.value = expression || "0";
-      return;
-    }
-
-    if (key === "=") {
-      try {
-        const safeExpression = expression
-          .replace(/×/g, "*")
-          .replace(/÷/g, "/")
-          .replace(/−/g, "-");
-
-        if (!safeExpression || !/^[\d+\-*/().%\s]+$/.test(safeExpression)) {
-          throw new Error("Invalid expression");
+        if (value === "C") {
+          display.value = "0";
+          display.dataset.expr = "";
+          return;
         }
 
-        const result = Function(`"use strict"; return (${safeExpression});`)();
-        if (!Number.isFinite(result)) throw new Error("Invalid result");
-
-        display.value = String(Number(result.toFixed(10)));
-        display.dataset.expression = display.value;
-      } catch {
-        display.value = "错误";
-        display.dataset.expression = "";
-      }
-      return;
-    }
-
-    if (key === "±") {
-      if (expression) expression = `-(${expression})`;
-      else expression = "-";
-    } else {
-      expression += key;
-    }
-
-    display.dataset.expression = expression;
-    display.value = expression || "0";
-  }
-
-  function initBrowser(win) {
-    win._history = ["about:home"];
-    win._historyIndex = 0;
-    showBrowserHome(win);
-  }
-
-  function getBrowserHome() {
-    const links = BOOKMARKS.map(bookmark => `
-      <a href="${escapeHTML(bookmark.url)}" target="_self">
-        ${escapeHTML(bookmark.icon)} ${escapeHTML(bookmark.name)}
-      </a>
-    `).join("");
-
-    return `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-*{box-sizing:border-box}
-body{
-  font-family:"Segoe UI","Microsoft YaHei",sans-serif;
-  margin:0;min-height:100vh;display:grid;place-items:center;
-  background:linear-gradient(135deg,#1b3a75,#241b58 55%,#0a1226);
-  color:#fff
-}
-.card{
-  max-width:calc(100vw - 32px);text-align:center;padding:34px 42px;
-  border-radius:16px;background:rgba(255,255,255,.08);
-  backdrop-filter:blur(10px)
-}
-h1{margin:0 0 6px;font-size:26px}
-p{margin:0 0 20px;color:#b9c6e4;font-size:13px}
-a{
-  display:inline-block;margin:5px;padding:9px 16px;border-radius:8px;
-  background:rgba(255,255,255,.14);color:#fff;text-decoration:none;font-size:13px
-}
-a:hover{background:rgba(255,255,255,.26)}
-</style>
-</head>
-<body>
-<div class="card">
-  <h1>🌐 Web 浏览器</h1>
-  <p>在上方地址栏输入网址，或点击下面的快捷入口</p>
-  ${links}
-</div>
-</body>
-</html>`;
-  }
-
-  function showBrowserHome(win) {
-    const frame = $("[data-browser-frame]", win);
-    const address = $("[data-browser-address]", win);
-    if (!frame) return;
-
-    frame.removeAttribute("src");
-    frame.srcdoc = getBrowserHome();
-    if (address) address.value = "";
-  }
-
-  function normalizeURL(value) {
-    const raw = String(value || "").trim();
-    if (!raw) return "";
-
-    const candidate = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(raw)
-      ? raw
-      : `https://${raw}`;
-
-    try {
-      const url = new URL(candidate);
-
-      if (url.protocol === "http:" || url.protocol === "https:") {
-        return url.href;
-      }
-
-      return "";
-    } catch {
-      return `https://www.bing.com/search?q=${encodeURIComponent(raw)}`;
-    }
-  }
-
-  function browserNavigate(win, value) {
-    const url = normalizeURL(value);
-    if (!url) return notify("请输入有效的网址");
-
-    win._history = (win._history || ["about:home"]).slice(0, win._historyIndex + 1);
-    win._history.push(url);
-    win._historyIndex = win._history.length - 1;
-    loadBrowserURL(win, url);
-  }
-
-  function loadBrowserURL(win, url) {
-    const frame = $("[data-browser-frame]", win);
-    const address = $("[data-browser-address]", win);
-    if (!frame) return;
-
-    if (url === "about:home") {
-      showBrowserHome(win);
-      return;
-    }
-
-    frame.removeAttribute("srcdoc");
-    frame.src = url;
-    if (address) address.value = url;
-  }
-
-  function browserCommand(win, command) {
-    const address = $("[data-browser-address]", win);
-
-    switch (command) {
-      case "go":
-        browserNavigate(win, address?.value);
-        break;
-
-      case "home":
-        win._history = (win._history || []).slice(0, win._historyIndex + 1);
-        win._history.push("about:home");
-        win._historyIndex = win._history.length - 1;
-        showBrowserHome(win);
-        break;
-
-      case "reload": {
-        const current = win._history?.[win._historyIndex] || "about:home";
-        loadBrowserURL(win, current);
-        break;
-      }
-
-      case "back":
-        if (win._historyIndex > 0) {
-          win._historyIndex--;
-          loadBrowserURL(win, win._history[win._historyIndex]);
+        if (value === "=") {
+          try {
+            const expr = (display.dataset.expr || display.value || "0")
+              .replace(/×/g, "*")
+              .replace(/÷/g, "/");
+            const result = Function(`"use strict"; return (${expr});`)();
+            display.value = Number.isFinite(result) ? String(result) : "Error";
+            display.dataset.expr = display.value;
+          } catch {
+            display.value = "Error";
+            display.dataset.expr = "";
+          }
+          return;
         }
-        break;
 
-      case "forward":
-        if (win._historyIndex < win._history.length - 1) {
-          win._historyIndex++;
-          loadBrowserURL(win, win._history[win._historyIndex]);
-        }
-        break;
-
-      case "newtab": {
-        const current = win._history?.[win._historyIndex];
-        if (!current || current === "about:home") return notify("请先打开一个网页");
-        window.open(current, "_blank", "noopener,noreferrer");
-        break;
-      }
-
-      default:
-        break;
-    }
+        const current = display.dataset.expr || "0";
+        const next = current === "0" ? value : current + value;
+        display.dataset.expr = next;
+        display.value = next;
+      });
+    });
   }
 
-  function initPaint(win) {
-    const canvas = $("[data-paint-canvas]", win);
-    if (!canvas || canvas.dataset.initialized) return;
-    canvas.dataset.initialized = "true";
-
+  if (appName === "paint") {
+    const canvas = content.querySelector("canvas");
+    if (!canvas) return;
     const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-
     let drawing = false;
     let lastX = 0;
     let lastY = 0;
 
-    function point(event) {
+    const resize = () => {
       const rect = canvas.getBoundingClientRect();
-      return {
-        x: (event.clientX - rect.left) * canvas.width / rect.width,
-        y: (event.clientY - rect.top) * canvas.height / rect.height
-      };
-    }
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.max(1, Math.floor(rect.width * ratio));
+      canvas.height = Math.max(1, Math.floor(rect.height * ratio));
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.scale(ratio, ratio);
+    };
 
-    canvas.addEventListener("pointerdown", event => {
+    resize();
+
+    canvas.addEventListener("pointerdown", (e) => {
       drawing = true;
-      const p = point(event);
-      lastX = p.x;
-      lastY = p.y;
-      canvas.setPointerCapture(event.pointerId);
+      const rect = canvas.getBoundingClientRect();
+      lastX = e.clientX - rect.left;
+      lastY = e.clientY - rect.top;
     });
 
-    canvas.addEventListener("pointermove", event => {
+    canvas.addEventListener("pointermove", (e) => {
       if (!drawing) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
 
-      const p = point(event);
-      const color = $("[data-paint-color]", win)?.value || "#1a73e8";
-      const size = Number($("[data-paint-size]", win)?.value || 5);
-      const eraser = Boolean($("[data-paint-eraser]", win)?.checked);
+      const color = content.querySelector("[data-color]")?.value || "#1a73e8";
+      const size = Number(content.querySelector("[data-size]")?.value || 5);
 
-      ctx.strokeStyle = eraser ? "#fff" : color;
-      ctx.lineWidth = eraser ? size * 3 : size;
       ctx.beginPath();
       ctx.moveTo(lastX, lastY);
-      ctx.lineTo(p.x, p.y);
+      ctx.lineTo(x, y);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = size;
+      ctx.lineCap = "round";
       ctx.stroke();
 
-      lastX = p.x;
-      lastY = p.y;
+      lastX = x;
+      lastY = y;
     });
 
     canvas.addEventListener("pointerup", () => drawing = false);
-    canvas.addEventListener("pointercancel", () => drawing = false);
-  }
+    canvas.addEventListener("pointerleave", () => drawing = false);
 
-  function paintCommand(win, command) {
-    const canvas = $("[data-paint-canvas]", win);
-    if (!canvas) return;
-
-    const ctx = canvas.getContext("2d");
-
-    if (command === "clear") {
-      ctx.fillStyle = "#fff";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      return notify("画布已清空");
-    }
-
-    if (command === "save") {
-      const inputName = prompt("图片名称：", "我的画作.png");
-      if (!inputName?.trim()) return;
-
-      const name = /\.png$/i.test(inputName.trim())
-        ? inputName.trim()
-        : `${inputName.trim()}.png`;
-
-      const created = createNode(getDesktopFolder().id, "file", name, canvas.toDataURL("image/png"));
-      if (!created) return;
-
-      save();
-      renderAllFileViews();
-      notify("画作已保存到桌面");
-    }
-  }
-
-  function initMinesweeper(win) {
-    const rows = 9;
-    const columns = 9;
-    const mineCount = 10;
-    const cells = Array.from({ length: rows * columns }, () => ({
-      mine: false,
-      open: false,
-      flag: false,
-      count: 0
-    }));
-
-    let placed = 0;
-    while (placed < mineCount) {
-      const index = Math.floor(Math.random() * cells.length);
-      if (!cells[index].mine) {
-        cells[index].mine = true;
-        placed++;
-      }
-    }
-
-    function neighbors(index) {
-      const row = Math.floor(index / columns);
-      const col = index % columns;
-      const result = [];
-
-      for (let dr = -1; dr <= 1; dr++) {
-        for (let dc = -1; dc <= 1; dc++) {
-          if (dr === 0 && dc === 0) continue;
-          const nr = row + dr;
-          const nc = col + dc;
-          if (nr >= 0 && nr < rows && nc >= 0 && nc < columns) {
-            result.push(nr * columns + nc);
-          }
-        }
-      }
-
-      return result;
-    }
-
-    cells.forEach((cell, index) => {
-      cell.count = neighbors(index).filter(i => cells[i].mine).length;
+    content.querySelector("[data-clear]")?.addEventListener("click", () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
     });
-
-    win._mine = { cells, neighbors, mineCount, ended: false, startedAt: Date.now() };
-    renderMinesweeper(win);
   }
 
-  function renderMinesweeper(win) {
-    const grid = $("[data-mine-grid]", win);
-    const game = win._mine;
-    if (!grid || !game) return;
+  if (appName === "terminal") {
+    const input = content.querySelector(".terminal-input");
+    const output = content.querySelector(".terminal-output");
+    if (!input || !output) return;
 
-    grid.innerHTML = game.cells.map((cell, index) => {
-      let className = "mine-cell";
-      let label = "";
+    input.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
 
-      if (cell.open) {
-        className += " open";
-        if (cell.mine) {
-          className += " boom";
-          label = "💥";
-        } else if (cell.count > 0) {
-          className += ` mine-n${cell.count}`;
-          label = String(cell.count);
+      const cmd = input.value.trim();
+      if (!cmd) return;
+
+      const row = document.createElement("div");
+      row.className = "terminal-row";
+      row.innerHTML = `<span class="terminal-prompt">C:\\Users\\User&gt;</span><span>${cmd}</span>`;
+      output.appendChild(row);
+
+      const result = runTerminalCommand(cmd);
+      if (result) {
+        const res = document.createElement("div");
+        res.textContent = result;
+        output.appendChild(res);
+      }
+
+      input.value = "";
+      output.scrollTop = output.scrollHeight;
+    });
+  }
+
+  if (appName === "notepad") {
+    const textarea = content.querySelector("textarea");
+    if (!textarea) return;
+
+    textarea.addEventListener("input", () => {
+      const fileId = textarea.dataset.fileId;
+      if (!fileId) return;
+      const node = findNode(fileId);
+      if (node) {
+        node.content = textarea.value;
+        saveFS();
+      }
+    });
+  }
+
+  if (appName === "settings") {
+    content.querySelector("[data-theme-toggle]")?.addEventListener("click", () => {
+      state.darkMode = !state.darkMode;
+      applyTheme();
+      notify(state.darkMode ? "已切换到深色模式" : "已切换到浅色模式");
+    });
+  }
+}
+
+function runTerminalCommand(cmd) {
+  const lower = cmd.toLowerCase();
+
+  if (lower === "help") {
+    return [
+      "help  显示命令帮助",
+      "ver   显示版本",
+      "dir   列出目录",
+      "ls    列出目录",
+      "pwd   显示当前目录",
+      "open  打开应用",
+      "apps  显示应用列表",
+      "mkdir 创建目录",
+      "touch 创建文件",
+      "cat   查看文件内容",
+      "rename 重命名",
+      "del   删除文件/目录",
+      "copy  复制",
+      "move  移动",
+      "theme 切换主题",
+      "tree  显示目录树",
+      "cls   清屏",
+      "date  当前日期",
+      "time  当前时间",
+      "whoami 当前用户"
+    ].join("\n");
+  }
+
+  if (lower === "ver") return "Windows Web Terminal v1.0";
+  if (lower === "date") return new Date().toLocaleDateString("zh-CN");
+  if (lower === "time") return new Date().toLocaleTimeString("zh-CN");
+  if (lower === "whoami") return "windows-web\\user";
+
+  if (lower === "pwd") return "C:\\Users\\User\\Desktop";
+  if (lower === "dir" || lower === "ls") return (fs.children || []).map(item => item.name).join("\n") || "空目录";
+
+  if (lower === "cls" || lower === "clear") {
+    const terminal = document.querySelector(".terminal-output");
+    if (terminal) terminal.innerHTML = "";
+    return "";
+  }
+
+  if (lower === "apps") {
+    return Object.entries(APPS).map(([key, app]) => `${key} - ${app.title}`).join("\n");
+  }
+
+  if (lower.startsWith("open ")) {
+    const appKey = lower.replace("open ", "").trim();
+    if (APPS[appKey]) {
+      openApp(appKey);
+      return `已打开 ${APPS[appKey].title}`;
+    }
+    return `找不到应用: ${appKey}`;
+  }
+
+  if (lower === "theme dark") {
+    state.darkMode = true;
+    applyTheme();
+    return "已切换到深色模式";
+  }
+
+  if (lower === "theme light") {
+    state.darkMode = false;
+    applyTheme();
+    return "已切换到浅色模式";
+  }
+
+  if (lower === "theme toggle") {
+    state.darkMode = !state.darkMode;
+    applyTheme();
+    return state.darkMode ? "已切换到深色模式" : "已切换到浅色模式";
+  }
+
+  if (lower === "tree") {
+    const lines = [];
+    function walk(node, prefix = "") {
+      for (let i = 0; i < node.children.length; i++) {
+        const child = node.children[i];
+        const isLast = i === node.children.length - 1;
+        lines.push(`${prefix}${isLast ? "└─" : "├─"} ${child.name}`);
+        if (child.type === "folder") {
+          walk(child, prefix + (isLast ? "   " : "│  "));
         }
-      } else if (cell.flag) {
-        label = "🚩";
-      }
-
-      return `<button class="${className}" data-mine-cell="${index}" type="button">${label}</button>`;
-    }).join("");
-
-    const flags = game.cells.filter(cell => cell.flag).length;
-    $("[data-mine-count]", win).textContent = `💣 ${game.mineCount - flags}`;
-    $("[data-mine-time]", win).textContent =
-      `⏱ ${Math.floor((Date.now() - game.startedAt) / 1000)} 秒`;
-  }
-
-  function openMineCell(win, index) {
-    const game = win._mine;
-    const cell = game?.cells[index];
-    if (!game || game.ended || !cell || cell.open || cell.flag) return;
-
-    cell.open = true;
-
-    if (cell.mine) {
-      game.ended = true;
-      game.cells.forEach(item => {
-        if (item.mine) item.open = true;
-      });
-      renderMinesweeper(win);
-      return notify("踩到地雷了！点击重新开始再试一次");
-    }
-
-    if (cell.count === 0) {
-      const stack = [index];
-
-      while (stack.length) {
-        const current = stack.pop();
-
-        game.neighbors(current).forEach(neighborIndex => {
-          const neighbor = game.cells[neighborIndex];
-          if (neighbor.open || neighbor.flag || neighbor.mine) return;
-
-          neighbor.open = true;
-          if (neighbor.count === 0) stack.push(neighborIndex);
-        });
       }
     }
-
-    const safeCells = game.cells.length - game.mineCount;
-    const openedSafeCells = game.cells.filter(item => item.open && !item.mine).length;
-
-    renderMinesweeper(win);
-
-    if (openedSafeCells === safeCells) {
-      game.ended = true;
-      game.cells.forEach(item => {
-        if (item.mine) item.flag = true;
-      });
-      renderMinesweeper(win);
-      notify("恭喜，扫雷通关！");
-    }
+    walk(fs);
+    return lines.join("\n") || "空目录";
   }
 
-  function toggleMineFlag(win, index) {
-    const game = win._mine;
-    const cell = game?.cells[index];
-    if (!game || game.ended || !cell || cell.open) return;
-
-    cell.flag = !cell.flag;
-    renderMinesweeper(win);
+  if (lower.startsWith("mkdir ")) {
+    const name = cmd.slice(6).trim();
+    if (!name) return "用法: mkdir <文件夹名>";
+    const created = createNode(fs.id, "folder", name);
+    if (created) {
+      renderDesktop();
+      return `已创建文件夹: ${name}`;
+    }
+    return "创建失败，可能存在同名项目";
   }
 
-  function initCalendar(win) {
-    win._monthOffset = 0;
-    renderCalendar(win);
+  if (lower.startsWith("touch ")) {
+    const name = cmd.slice(6).trim();
+    if (!name) return "用法: touch <文件名>";
+    const created = createNode(fs.id, "file", name);
+    if (created) {
+      renderDesktop();
+      return `已创建文件: ${name}`;
+    }
+    return "创建失败，可能存在同名项目";
   }
 
-  function renderCalendar(win) {
-    const title = $("[data-calendar-title]", win);
-    const grid = $("[data-calendar-grid]", win);
-    if (!title || !grid) return;
-
-    const now = new Date();
-    const view = new Date(now.getFullYear(), now.getMonth() + win._monthOffset, 1);
-    const year = view.getFullYear();
-    const month = view.getMonth();
-    const firstWeekday = view.getDay();
-    const daysThisMonth = new Date(year, month + 1, 0).getDate();
-    const daysLastMonth = new Date(year, month, 0).getDate();
-    const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
-
-    title.textContent = `${year} 年 ${month + 1} 月`;
-
-    let html = weekdays.map(day => `<div class="cal-wd">${day}</div>`).join("");
-
-    for (let i = firstWeekday - 1; i >= 0; i--) {
-      html += `<div class="cal-day dim">${daysLastMonth - i}</div>`;
-    }
-
-    for (let day = 1; day <= daysThisMonth; day++) {
-      const isToday =
-        win._monthOffset === 0 &&
-        day === now.getDate();
-
-      html += `<div class="cal-day${isToday ? " today" : ""}">${day}</div>`;
-    }
-
-    const used = firstWeekday + daysThisMonth;
-    const trailing = (7 - (used % 7)) % 7;
-
-    for (let day = 1; day <= trailing; day++) {
-      html += `<div class="cal-day dim">${day}</div>`;
-    }
-
-    grid.innerHTML = html;
+  if (lower.startsWith("cat ")) {
+    const name = cmd.slice(4).trim();
+    const node = findNodeByName(name);
+    if (!node || node.type !== "file") return "找不到该文件";
+    return node.content || "（文件内容为空）";
   }
 
-  function initTaskManager(win) {
-    renderTaskManager(win);
-    win._taskTimer = window.setInterval(() => {
-      if (win.isConnected && !win.classList.contains("minimized")) {
-        renderTaskManager(win, true);
+  if (lower.startsWith("rename ")) {
+    const parts = cmd.split(/\s+/);
+    if (parts.length < 3) return "用法: rename <原名> <新名>";
+    const oldName = parts[1];
+    const newName = parts[2];
+    const node = findNodeByName(oldName);
+    if (!node) return "找不到该项";
+    if (renameNode(node.id, newName)) {
+      renderDesktop();
+      refreshExplorerWindows();
+      return `已重命名: ${newName}`;
+    }
+    return "重命名失败";
+  }
+
+  if (lower.startsWith("del ") || lower.startsWith("rm ")) {
+    const name = cmd.slice(lower.startsWith("del ") ? 4 : 3).trim();
+    const node = findNodeByName(name);
+    if (!node || node.id === fs.id) return "无法删除根目录或不存在";
+    if (deleteNode(node.id)) {
+      renderDesktop();
+      refreshExplorerWindows();
+      return `已删除: ${node.name}`;
+    }
+    return "删除失败";
+  }
+
+  return `命令不存在: ${cmd}`;
+}
+
+function findNodeByName(name) {
+  const target = name.trim();
+  if (!target) return null;
+
+  const walk = (node) => {
+    if (!node) return null;
+    if (node.type === "folder") {
+      if (node.name.toLowerCase() === target.toLowerCase()) return node;
+      for (const child of node.children || []) {
+        const found = walk(child);
+        if (found) return found;
       }
-    }, 3000);
+    } else {
+      if (node.name.toLowerCase() === target.toLowerCase()) return node;
+    }
+    return null;
+  };
+  return walk(fs);
+}
+
+function renderExplorer(nodeId) {
+  const currentNode = findNode(nodeId) || fs;
+  const children = currentNode.children || [];
+  const parent = currentNode.id !== fs.id ? findParent(currentNode.id) : null;
+
+  const items = children.map(item => `
+    <div class="file-item" data-file-id="${item.id}" data-file-type="${item.type}">
+      <span class="icon">${item.type === "folder" ? "📁" : "📄"}</span>
+      <span>${item.name}</span>
+    </div>
+  `).join("");
+
+  return `
+    <div class="explorer-layout">
+      <aside class="sidebar">
+        <div class="nav-item selected">📁 ${fs.name}</div>
+        <div class="nav-item" data-go-root>🏠 根目录</div>
+        ${parent ? `<div class="nav-item" data-go-back data-current="${currentNode.id}">⬅ 返回上一级</div>` : ""}
+        <div class="nav-item">📄 文档</div>
+        <div class="nav-item">📥 下载</div>
+        <div class="nav-item">🖼️ 图片</div>
+        <div class="nav-item">🗑️ 回收站</div>
+      </aside>
+      <div class="files-area">
+        <h2>${currentNode.name}</h2>
+        <div class="file-grid">
+          ${items || '<div style="padding:10px;color:#666;">暂无内容</div>'}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderBrowser() {
+  return `
+    <div class="browser-wrap">
+      <div class="browser-toolbar">
+        <button data-browser="back" type="button">←</button>
+        <button data-browser="forward" type="button">→</button>
+        <button data-browser="home" type="button">⌂</button>
+        <input class="address" value="https://www.bing.com/" />
+        <button data-browser="go" type="button">Go</button>
+      </div>
+      <div class="browser-bookmarks">
+        ${BOOKMARKS.map(item => `
+          <button class="bm-card" data-url="${item.url}" type="button">
+            <span>${item.icon}</span>
+            <span>${item.name}</span>
+          </button>
+        `).join("")}
+      </div>
+      <iframe class="browser-frame" src="https://www.bing.com/" title="browser"></iframe>
+    </div>
+  `;
+}
+
+function renderNotepad(fileId) {
+  const file = findNode(fileId) || { id: "tmp", name: "新建记事本.txt", content: "" };
+  return `
+    <textarea class="notepad" data-file-id="${file.id}">${file.content || ""}</textarea>
+  `;
+}
+
+function renderCalculator() {
+  const keys = ["C", "/", "*", "-", "7", "8", "9", "+", "4", "5", "6", "=", "1", "2", "3", "0", "."];
+  return `
+    <div class="calc">
+      <input class="calc-display" value="0" readonly />
+      <div class="calc-grid">
+        ${keys.map(key => `<button class="calc-key">${key}</button>`).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderPaint() {
+  return `
+    <div class="paint-wrap">
+      <div class="paint-toolbar">
+        <input type="color" data-color value="#1a73e8" />
+        <input type="range" data-size min="1" max="20" value="5" />
+        <button data-clear type="button">清空</button>
+      </div>
+      <canvas class="paint-canvas" width="900" height="520"></canvas>
+    </div>
+  `;
+}
+
+function renderTerminal() {
+  return `
+    <div class="terminal">
+      <div class="terminal-output">
+        <div>Windows Web Terminal</div>
+        <div>键入 help 查看命令列表</div>
+      </div>
+      <div class="terminal-row">
+        <span class="terminal-prompt">C:\\Users\\User&gt;</span>
+        <input class="terminal-input" placeholder="输入命令..." />
+      </div>
+    </div>
+  `;
+}
+
+function renderMinesweeper() {
+  const cells = [];
+  for (let i = 0; i < 81; i++) {
+    cells.push(`<button class="mine-cell" data-index="${i}"></button>`);
+  }
+  return `
+    <div class="minesweeper">
+      <div class="mine-status">
+        <span>💣 扫雷</span>
+        <span>剩余 10</span>
+      </div>
+      <div class="mine-grid">
+        ${cells.join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderTaskManager() {
+  const rows = [
+    ["explorer", "资源管理器", "12%", "正常"],
+    ["browser", "浏览器", "8%", "正常"],
+    ["terminal", "终端", "3%", "正常"],
+    ["taskmgr", "任务管理器", "1%", "正常"]
+  ];
+  return `
+    <div class="taskmgr">
+      <table class="task-table">
+        <thead>
+          <tr>
+            <th>应用</th>
+            <th>进程名</th>
+            <th>CPU</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(([name, title, cpu, status]) => `
+            <tr>
+              <td>${APPS[name]?.icon || "🪟"} ${APPS[name]?.title || title}</td>
+              <td>${title}</td>
+              <td>${cpu}</td>
+              <td>${status}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderCalendar() {
+  const weeks = ["日", "一", "二", "三", "四", "五", "六"];
+  const dayCells = [];
+  for (let i = 0; i < 42; i++) {
+    const isToday = i === 12;
+    dayCells.push(`<div class="calendar-day ${isToday ? "today" : ""}">${i + 1}</div>`);
   }
 
-  function renderTaskManager(win, preserveSelection = false) {
-    const body = $("[data-task-body]", win);
-    if (!body) return;
+  return `
+    <div class="calendar">
+      <div class="calendar-head">
+        <button>‹</button>
+        <strong>2026 年 11 月</strong>
+        <button>›</button>
+      </div>
+      <div class="calendar-grid">
+        ${weeks.map(day => `<div class="calendar-weekday">${day}</div>`).join("")}
+        ${dayCells.join("")}
+      </div>
+    </div>
+  `;
+}
 
-    const selected = preserveSelection ? win.dataset.selectedTask : "";
-    const rows = [...windows.keys()].map(name => ({
-      name,
-      cpu: (Math.random() * 5).toFixed(1),
-      memory: Math.floor(30 + Math.random() * 100)
-    }));
-
-    body.innerHTML = rows.map(row => `
-      <tr data-task-app="${escapeHTML(row.name)}" class="${row.name === selected ? "selected" : ""}">
-        <td>${escapeHTML(APPS[row.name].icon)} ${escapeHTML(APPS[row.name].title)}</td>
-        <td>${row.cpu}%</td>
-        <td>${row.memory} MB</td>
-        <td>正在运行</td>
-      </tr>
-    `).join("") || `<tr><td colspan="4" class="empty">没有运行中的应用。</td></tr>`;
-  }
-
-  function endTask(win) {
-    const appName = win.dataset.selectedTask;
-    if (!appName) return notify("请先选择一个任务");
-    if (appName === "taskmgr") return notify("不能结束任务管理器自身");
-
-    const target = windows.get(appName);
-    if (!target) return notify("该应用已经关闭");
-
-    if (target._taskTimer) clearInterval(target._taskTimer);
-    if (target._mediaStop) target._mediaStop();
-
-    target.remove();
-    windows.delete(appName);
-    delete win.dataset.selectedTask;
-
-    renderTaskManager(win);
-    renderTaskbar();
-    notify(`已结束任务：${APPS[appName].title}`);
-  }
-
-  const MEDIA_TRACKS = [
-    { name: "小星星", notes: [[262, .35], [262, .35], [392, .35], [392, .35], [440, .35], [440, .35], [392, .7]] },
-    { name: "欢乐颂", notes: [[330, .35], [330, .35], [349, .35], [392, .35], [392, .35], [349, .35], [330, .35], [294, .35]] },
-    { name: "简单旋律", notes: [[330, .3], [392, .3], [440, .5], [392, .3], [330, .3], [262, .6]] }
+function renderMedia() {
+  const tracks = [
+    { name: "A Moment", time: "02:41" },
+    { name: "Night City", time: "03:45" },
+    { name: "Clouds", time: "04:16" }
   ];
 
-  function initMedia(win) {
-    win._mediaStop = null;
-  }
-
-  function playTrack(win, index) {
-    win._mediaStop?.();
-
-    const track = MEDIA_TRACKS[index];
-    if (!track) return;
-
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return notify("当前浏览器不支持音频播放");
-
-    const context = new AudioContextClass();
-    const gain = context.createGain();
-    gain.gain.value = 0.12;
-    gain.connect(context.destination);
-
-    const nowBox = $("[data-media-now]", win);
-    const title = $("[data-media-title]", win);
-
-    if (nowBox) nowBox.classList.add("playing");
-    if (title) title.textContent = `正在播放：${track.name}`;
-
-    let startTime = context.currentTime + 0.05;
-
-    track.notes.forEach(([frequency, duration]) => {
-      const oscillator = context.createOscillator();
-      const noteGain = context.createGain();
-
-      oscillator.type = "triangle";
-      oscillator.frequency.value = frequency;
-
-      noteGain.gain.setValueAtTime(0.0001, startTime);
-      noteGain.gain.exponentialRampToValueAtTime(1, startTime + 0.025);
-      noteGain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration * 0.9);
-
-      oscillator.connect(noteGain);
-      noteGain.connect(gain);
-      oscillator.start(startTime);
-      oscillator.stop(startTime + duration);
-
-      startTime += duration;
-    });
-
-    const timer = window.setTimeout(stop, Math.max(100, (startTime - context.currentTime) * 1000 + 200));
-
-    function stop() {
-      clearTimeout(timer);
-      try { context.close(); } catch {}
-      win._mediaStop = null;
-      if (nowBox) nowBox.classList.remove("playing");
-      if (title) title.textContent = "未在播放";
-    }
-
-    win._mediaStop = stop;
-  }
-
-  function toggleTheme() {
-    settings.dark = !settings.dark;
-    save();
-    applySettings();
-
-    const win = windows.get("settings");
-    if (win) renderWindowContent(win);
-
-    notify(settings.dark ? "已切换到深色模式" : "已切换到浅色模式");
-  }
-
-  function setWallpaper(name) {
-    settings.wallpaper = ["blue", "purple", "green"].includes(name) ? name : "blue";
-    save();
-    applySettings();
-    notify("桌面壁纸已更换");
-  }
-
-  function updateClock() {
-    const now = new Date();
-    const time = now.toLocaleTimeString("zh-CN", {
-      hour: "2-digit",
-      minute: "2-digit"
-    });
-    const date = now.toLocaleDateString("zh-CN", {
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit"
-    });
-
-    if ($("#clockTime")) $("#clockTime").textContent = time;
-    if ($("#clockDate")) $("#clockDate").textContent = date;
-  }
-
-  /* 终端路径参数支持双引号或单引号，例如 cat "文档/欢迎使用.txt" */
-  function parseArgs(text) {
-    const args = [];
-    const regex = /"([^"]*)"|'([^']*)'|(\S+)/g;
-    let match;
-
-    while ((match = regex.exec(text)) !== null) {
-      args.push(match[1] ?? match[2] ?? match[3]);
-    }
-
-    return args;
-  }
-
-  function resolvePath(path) {
-    if (!path || path === "." || path === "/" || path === "\\") return fs;
-
-    const parts = String(path).replace(/\\/g, "/").split("/").filter(Boolean);
-    let current = fs;
-
-    if (parts[0]?.toLowerCase() === fs.name.toLowerCase()) {
-      parts.shift();
-    }
-
-    for (const part of parts) {
-      if (part === ".") continue;
-
-      if (part === "..") {
-        current = current.id === fs.id ? fs : (findParent(current.id) || fs);
-        continue;
-      }
-
-      if (current.type !== "folder") return null;
-      current = current.children.find(child =>
-        child.name.toLowerCase() === part.toLowerCase()
-      );
-
-      if (!current) return null;
-    }
-
-    return current;
-  }
-
-  function resolveParentAndName(path) {
-    const parts = String(path || "").replace(/\\/g, "/").split("/").filter(Boolean);
-    if (!parts.length) return null;
-
-    const name = parts.pop();
-
-    if (parts[0]?.toLowerCase() === fs.name.toLowerCase()) {
-      parts.shift();
-    }
-
-    const parent = parts.length ? resolvePath(parts.join("/")) : fs;
-    if (!parent || parent.type !== "folder") return null;
-
-    return { parent, name };
-  }
-
-  function terminalPrint(win, text) {
-    const output = $("[data-terminal-output]", win);
-    if (!output) return;
-
-    output.textContent += `${text}\n`;
-    output.scrollTop = output.scrollHeight;
-  }
-
-  function terminalRun(win, commandText) {
-    const input = $("[data-terminal-input]", win);
-    const raw = commandText.trim();
-
-    if (!raw) return;
-
-    terminalPrint(win, `C:\\Users\\用户> ${raw}`);
-    if (input) input.value = "";
-
-    const splitAt = raw.search(/\s/);
-    const command = (splitAt < 0 ? raw : raw.slice(0, splitAt)).toLowerCase();
-    const rest = splitAt < 0 ? "" : raw.slice(splitAt).trim();
-    const args = parseArgs(rest);
-    const first = args[0];
-
-    let result = "";
-
-    switch (command) {
-      case "help":
-        result = [
-          "可用命令：",
-          "help, ver, date, time, whoami, pwd, dir, ls, echo, apps, open,",
-          "mkdir, touch, cat, rename, del, copy, move, theme, tree, cls",
-          "",
-          '示例：mkdir "项目资料"',
-          '示例：touch "项目资料/备注.txt"',
-          '示例：cat "文档/说明.txt"',
-          "示例：open browser",
-          "示例：theme dark"
-        ].join("\n");
-        break;
-
-      case "ver":
-        result = "Windows Web Terminal v1.0";
-        break;
-
-      case "date":
-        result = new Date().toLocaleDateString("zh-CN", {
-          year: "numeric", month: "long", day: "numeric", weekday: "long"
-        });
-        break;
-
-      case "time":
-        result = new Date().toLocaleTimeString("zh-CN");
-        break;
-
-      case "whoami":
-        result = "windows-web\\用户";
-        break;
-
-      case "pwd":
-        result = "此电脑";
-        break;
-
-      case "dir":
-      case "ls": {
-        const target = first ? resolvePath(first) : fs;
-
-        if (!target) {
-          result = "找不到该路径。";
-          break;
-        }
-
-        if (target.type !== "folder") {
-          result = "该路径不是文件夹。";
-          break;
-        }
-
-        result = target.children.length
-          ? target.children.map(item => `${item.type === "folder" ? "[文件夹]" : "[文件]"} ${item.name}`).join("\n")
-          : "空目录";
-        break;
-      }
-
-      case "echo":
-        result = rest;
-        break;
-
-      case "apps":
-        result = Object.entries(APPS)
-          .map(([name, app]) => `${name} - ${app.title}`)
-          .join("\n");
-        break;
-
-      case "open": {
-        const appName = first?.toLowerCase();
-
-        if (!appName || !APPS[appName]) {
-          result = "用法：open <应用英文名>。输入 apps 查看应用列表。";
-        } else {
-          openApp(appName);
-          result = `已打开：${APPS[appName].title}`;
-        }
-        break;
-      }
-
-      case "mkdir": {
-        if (!first) {
-          result = "用法：mkdir <文件夹路径>";
-          break;
-        }
-
-        const target = resolveParentAndName(first);
-        if (!target) {
-          result = "路径无效，或父文件夹不存在。";
-          break;
-        }
-
-        const created = createNode(target.parent.id, "folder", target.name);
-        if (created) {
-          save();
-          renderAllFileViews();
-          result = `已创建文件夹：${first}`;
-        } else {
-          result = "创建失败，可能存在同名项目。";
-        }
-        break;
-      }
-
-      case "touch": {
-        if (!first) {
-          result = "用法：touch <文件路径>";
-          break;
-        }
-
-        if (resolvePath(first)) {
-          result = "该路径已经存在。";
-          break;
-        }
-
-        const target = resolveParentAndName(first);
-        if (!target) {
-          result = "路径无效，或父文件夹不存在。";
-          break;
-        }
-
-        const created = createNode(target.parent.id, "file", target.name);
-        if (created) {
-          save();
-          renderAllFileViews();
-          result = `已创建文件：${first}`;
-        } else {
-          result = "创建失败，可能存在同名项目。";
-        }
-        break;
-      }
-
-      case "cat": {
-        const target = first ? resolvePath(first) : null;
-
-        if (!target) result = "找不到该文件。";
-        else if (target.type !== "file") result = "该路径是文件夹。";
-        else result = target.content || "（文件内容为空）";
-        break;
-      }
-
-      case "rename": {
-        if (args.length < 2) {
-          result = '用法：rename <原路径> <新名称>';
-          break;
-        }
-
-        const target = resolvePath(args[0]);
-        const parent = target && findParent(target.id);
-        const newName = args[1].trim();
-
-        if (!target || !parent) {
-          result = "找不到该项目，或不能重命名根目录。";
-          break;
-        }
-
-        if (parent.children.some(item =>
-          item.id !== target.id && item.name.toLowerCase() === newName.toLowerCase()
-        )) {
-          result = "目标目录中已有同名项目。";
-          break;
-        }
-
-        target.name = newName;
-        save();
-        renderAllFileViews();
-        result = `已重命名为：${newName}`;
-        break;
-      }
-
-      case "del":
-      case "rm": {
-        const target = first ? resolvePath(first) : null;
-
-        if (!target || target.id === fs.id) {
-          result = "找不到项目，或不能删除根目录。";
-          break;
-        }
-
-        if (deleteNodeToTrash(target.id)) {
-          renderAllFileViews();
-          result = `已移到回收站：${target.name}`;
-        } else {
-          result = "删除失败。";
-        }
-        break;
-      }
-
-      case "copy":
-      case "move": {
-        if (args.length < 2) {
-          result = `用法：${command} <源路径> <目标文件夹路径>`;
-          break;
-        }
-
-        const source = resolvePath(args[0]);
-        const destination = resolvePath(args[1]);
-
-        if (!source || !destination || destination.type !== "folder") {
-          result = "源路径或目标文件夹无效。";
-          break;
-        }
-
-        if (source.id === fs.id ||
-            (source.type === "folder" && containsNode(source, destination.id))) {
-          result = "不能将根目录移动，或把文件夹放进自身内部。";
-          break;
-        }
-
-        if (destination.children.some(item =>
-          item.name.toLowerCase() === source.name.toLowerCase()
-        )) {
-          result = "目标文件夹中已有同名项目。";
-          break;
-        }
-
-        if (command === "copy") {
-          destination.children.push(cloneNode(source));
-        } else {
-          const parent = findParent(source.id);
-          if (!parent) {
-            result = "不能移动根目录。";
-            break;
-          }
-
-          parent.children = parent.children.filter(item => item.id !== source.id);
-          destination.children.push(source);
-        }
-
-        save();
-        renderAllFileViews();
-        result = command === "copy" ? "复制完成。" : "移动完成。";
-        break;
-      }
-
-      case "theme": {
-        const mode = (first || "toggle").toLowerCase();
-
-        if (mode === "dark") settings.dark = true;
-        else if (mode === "light") settings.dark = false;
-        else if (mode === "toggle") settings.dark = !settings.dark;
-        else {
-          result = "用法：theme [dark|light|toggle]";
-          break;
-        }
-
-        save();
-        applySettings();
-        result = `主题已切换为${settings.dark ? "深色" : "浅色"}模式。`;
-        break;
-      }
-
-      case "tree": {
-        const lines = [];
-
-        function walk(node, prefix) {
-          for (let i = 0; i < node.children.length; i++) {
-            const child = node.children[i];
-            const last = i === node.children.length - 1;
-            lines.push(`${prefix}${last ? "└─ " : "├─ "}${child.name}`);
-
-            if (child.type === "folder") {
-              walk(child, prefix + (last ? "   " : "│  "));
-            }
-          }
-        }
-
-        walk(fs, "");
-        result = lines.join("\n") || "空目录";
-        break;
-      }
-
-      case "cls":
-      case "clear":
-        $("[data-terminal-output]", win).textContent = "";
-        return;
-
-      default:
-        result = `命令不存在：${raw}\n输入 help 查看命令列表。`;
-    }
-
-    if (result) terminalPrint(win, result);
-  }
-
-  function updateClock() {
-    const now = new Date();
-    const time = now.toLocaleTimeString("zh-CN", {
-      hour: "2-digit",
-      minute: "2-digit"
-    });
-    const date = now.toLocaleDateString("zh-CN", {
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit"
-    });
-
-    if ($("#clockTime")) $("#clockTime").textContent = time;
-    if ($("#clockDate")) $("#clockDate").textContent = date;
-  }
-})();
+  return `
+    <div class="media">
+      <div class="media-now">
+        <div class="media-disc">♫</div>
+        <div>
+          <h3 style="margin:0">Now Playing</h3>
+          <div style="color:#666;margin-top:6px;">Night City</div>
+        </div>
+      </div>
+      ${tracks.map(track => `
+        <div class="media-track">
+          <span>${track.name}</span>
+          <span style="margin-left:auto;color:#666;">${track.time}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderSettings() {
+  return `
+    <div class="settings">
+      <h2>设置</h2>
+      <div class="settings-grid">
+        <div class="setting-card">
+          <h3>外观</h3>
+          <p>切换深色或浅色主题，适应不同工作环境。</p>
+          <button data-theme-toggle type="button">
+            ${state.darkMode ? "浅色模式" : "深色模式"}
+          </button>
+        </div>
+        <div class="setting-card">
+          <h3>系统</h3>
+          <p>管理应用、存储空间与通知设置。</p>
+          <button type="button">打开设置</button>
+        </div>
+        <div class="setting-card">
+          <h3>更新</h3>
+          <p>检查系统更新并安装最新补丁。</p>
+          <button type="button">检查更新</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderTrash() {
+  return `
+    <div class="trash-area">
+      <h2>回收站</h2>
+      <div class="file-grid">
+        <div class="file-item"><span class="icon">📄</span><span>已删除文件</span></div>
+        <div class="file-item"><span class="icon">📁</span><span>清理目录</span></div>
+      </div>
+    </div>
+  `;
+}
+
+function renderAbout() {
+  return `
+    <div class="about">
+      <div class="about-card">
+        <h2>Windows Web Pro</h2>
+        <p>这是一个增强版的 Windows 风格网页桌面，保留原有交互体验，同时补齐了文件管理与应用操作的完整闭环。</p>
+        <p>支持：桌面图标、开始菜单、任务栏、窗口管理、资源管理器、浏览器、记事本、计算器、终端等。</p>
+        <p>技术栈：HTML + CSS + JavaScript</p>
+      </div>
+    </div>
+  `;
+}

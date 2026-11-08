@@ -1,85 +1,64 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Windows Web 桌面</title>
-  <link rel="stylesheet" href="./styles.css">
-  <script src="./app.js" defer></script>
-</head>
-<body>
-  <main class="desktop" id="desktop" aria-label="桌面"></main>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Windows Web Pro</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main id="desktop" class="desktop" aria-label="桌面"></main>
 
-  <section class="panel start-menu" id="startMenu" aria-label="开始菜单">
-    <input
-      class="start-search"
-      id="startSearch"
-      placeholder="搜索应用"
-      autocomplete="off"
-      aria-label="搜索应用"
-    >
-    <div class="heading">
-      <span>已固定</span>
-      <button id="allApps" type="button">所有应用</button>
-    </div>
-    <div class="app-grid" id="appGrid"></div>
-    <div class="start-footer">
-      <div class="user"><span class="avatar">👤</span><span>用户</span></div>
-      <button class="small-button" id="powerButton" type="button">🔒 关机</button>
-    </div>
-  </section>
+    <section class="panel start-menu" id="startMenu" aria-label="开始菜单">
+      <input
+        class="start-search"
+        id="startSearch"
+        placeholder="Search apps..."
+        autocomplete="off"
+      />
+      <div class="heading">
+        <span>应用</span>
+        <button id="allAppsBtn" type="button">All apps</button>
+      </div>
+      <div id="appGrid" class="app-grid"></div>
+    </section>
 
-  <section class="panel quick-panel" id="quickPanel" aria-label="快速设置">
-    <div class="quick-grid">
-      <button class="quick-tile on" type="button">📶 Wi‑Fi</button>
-      <button class="quick-tile on" type="button">🔵 蓝牙</button>
-      <button class="quick-tile" type="button">🌙 勿扰模式</button>
-      <button class="quick-tile on" type="button">🔆 夜灯模式</button>
-    </div>
-    <div class="slider-row">💡 <input type="range" min="20" max="100" value="80" aria-label="亮度"></div>
-    <div class="slider-row">🔊 <input type="range" min="0" max="100" value="65" aria-label="音量"></div>
-  </section>
+    <section class="panel notifications" id="notifications" aria-label="通知列表">
+      <div class="heading">
+        <span>通知</span>
+        <button id="clearNotifications" type="button">清空</button>
+      </div>
+      <div id="notificationCard" class="notification-card">
+        Windows Web Pro 已启动<br />
+        欢迎使用桌面系统。
+      </div>
+    </section>
 
-  <section class="panel notifications" id="notifications" aria-label="通知">
-    <div class="heading notification-heading">
-      <span>通知</span>
-      <button id="clearNotifications" type="button">清除全部</button>
-    </div>
-    <div class="notification" id="notificationCard">
-      <b>ℹ️ 欢迎使用 Windows Web</b><br>
-      文件保存在浏览器本地存储中。
-    </div>
-  </section>
+    <div id="contextMenu" class="context-menu"></div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <div class="context-menu" id="contextMenu"></div>
-  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <footer class="taskbar">
+      <div class="taskbar-center">
+        <button class="task-button" id="startButton" title="开始" type="button">🪟</button>
 
-  <footer class="taskbar">
-    <div class="taskbar-center">
-      <button class="task-button" id="startButton" title="打开开始菜单" type="button" aria-label="开始菜单">
-        <span class="win-logo" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-      </button>
+        <label class="task-search" aria-label="应用搜索">
+          <input id="taskSearchInput" placeholder="Search..." />
+        </label>
 
-      <label class="task-search" id="taskSearch">
-        🔍 <input id="taskSearchInput" placeholder="搜索" aria-label="搜索应用">
-      </label>
+        <div id="taskButtons" class="task-buttons"></div>
+      </div>
 
-      <button class="task-button" data-launch="explorer" title="文件资源管理器" type="button">📂</button>
-      <button class="task-button" data-launch="browser" title="浏览器" type="button">🌐</button>
-      <button class="task-button" data-launch="notepad" title="记事本" type="button">📄</button>
-      <button class="task-button" data-launch="calculator" title="计算器" type="button">🧮</button>
-      <button class="task-button" data-launch="minesweeper" title="扫雷" type="button">💣</button>
+      <div class="tray">
+        <button id="quickButton" title="通知" type="button">🔔</button>
+        <button id="clockButton" title="时钟" type="button">
+          <div id="clockTime">00:00</div>
+          <div id="clockDate">2026/11/08</div>
+        </button>
+      </div>
+    </footer>
 
-      <div class="task-buttons" id="taskButtons"></div>
-    </div>
-
-    <div class="tray">
-      <button id="quickButton" title="快速设置" type="button">⚙ 📶 🔊</button>
-      <button class="clock" id="clockButton" title="通知和日期" type="button">
-        <div id="clockTime"></div>
-        <div id="clockDate"></div>
-      </button>
-    </div>
-  </footer>
-</body>
+    <script src="./data.js"></script>
+    <script src="./filesystem.js"></script>
+    <script src="./app.js"></script>
+  </body>
 </html>
