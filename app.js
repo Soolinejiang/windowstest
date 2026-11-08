@@ -71,7 +71,6 @@ function renderDesktop() {
 
   desktop.innerHTML = "";
 
-  // 先渲染文件系统图标
   const items = fs.children || [];
   items.forEach(item => {
     const node = document.createElement("div");
@@ -99,7 +98,6 @@ function renderDesktop() {
     desktop.appendChild(node);
   });
 
-  // 再渲染所有应用桌面快捷方式
   Object.entries(APPS).forEach(([key, app]) => {
     const iconEl = document.createElement("div");
     iconEl.className = "desktop-icon";
@@ -732,87 +730,176 @@ function bindAppContentEvents(appName, win) {
     });
   }
 
-  if (appName === "paint") {
-    const canvas = content.querySelector("canvas");
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    let drawing = false;
-    let lastX = 0;
-    let lastY = 0;
-
-    const resize = () => {
-      const rect = canvas.getBoundingClientRect();
-      const ratio = window.devicePixelRatio || 1;
-      canvas.width = Math.max(1, Math.floor(rect.width * ratio));
-      canvas.height = Math.max(1, Math.floor(rect.height * ratio));
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.scale(ratio, ratio);
-    };
-
-    resize();
-
-    canvas.addEventListener("pointerdown", (e) => {
-      drawing = true;
-      const rect = canvas.getBoundingClientRect();
-      lastX = e.clientX - rect.left;
-      lastY = e.clientY - rect.top;
-    });
-
-    canvas.addEventListener("pointermove", (e) => {
-      if (!drawing) return;
-      const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-
-      const color = content.querySelector("[data-color]")?.value || "#1a73e8";
-      const size = Number(content.querySelector("[data-size]")?.value || 5);
-
-      ctx.beginPath();
-      ctx.moveTo(lastX, lastY);
-      ctx.lineTo(x, y);
-      ctx.strokeStyle = color;
-      ctx.lineWidth = size;
-      ctx.lineCap = "round";
-      ctx.stroke();
-
-      lastX = x;
-      lastY = y;
-    });
-
-    canvas.addEventListener("pointerup", () => drawing = false);
-    canvas.addEventListener("pointerleave", () => drawing = false);
-
-    content.querySelector("[data-clear]")?.addEventListener("click", () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-    });
-  }
-
   if (appName === "terminal") {
     const input = content.querySelector(".terminal-input");
     const output = content.querySelector(".terminal-output");
     if (!input || !output) return;
 
-    input.addEventListener("keydown", (e) => {
-      if (e.key !== "Enter") return;
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
 
       const cmd = input.value.trim();
       if (!cmd) return;
 
+      input.value = "";
+
+      if (/^(cls|clear)$/i.test(cmd)) {
+        output.replaceChildren();
+        return;
+      }
+
       const row = document.createElement("div");
       row.className = "terminal-row";
-      row.innerHTML = `<span class="terminal-prompt">C:\\Users\\User&gt;</span><span>${cmd}</span>`;
+
+      const prompt = document.createElement("span");
+      prompt.className = "terminal-prompt";
+      prompt.textContent = "C:\\Users\\User>";
+
+      const command = document.createElement("span");
+      command.textContent = cmd;
+
+      row.append(prompt, command);
       output.appendChild(row);
 
       const result = runTerminalCommand(cmd);
       if (result) {
-        const res = document.createElement("div");
-        res.textContent = result;
-        output.appendChild(res);
+        const resultElement = document.createElement("div");
+        resultElement.textContent = result;
+        output.appendChild(resultElement);
       }
 
-      input.value = "";
       output.scrollTop = output.scrollHeight;
     });
+  }
+
+  if (appName === "paint") {
+    const canvas = content.querySelector(".paint-canvas");
+    if (!canvas) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    let drawing = false;
+    let lastX = 0;
+    let lastY = 0;
+    let pixelRatio = window.devicePixelRatio || 1;
+    let hasInitializedSize = false;
+
+    const resizeCanvas = () => {
+      if (!canvas.isConnected) return;
+
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+
+      const nextRatio = window.devicePixelRatio || 1;
+      let snapshot = null;
+
+      if (hasInitializedSize && canvas.width && canvas.height) {
+        snapshot = document.createElement("canvas");
+        snapshot.width = canvas.width;
+        snapshot.height = canvas.height;
+        const snapshotCtx = snapshot.getContext("2d");
+        if (snapshotCtx) {
+          snapshotCtx.drawImage(canvas, 0, 0);
+        }
+      }
+
+      canvas.width = Math.max(1, Math.round(rect.width * nextRatio));
+      canvas.height = Math.max(1, Math.round(rect.height * nextRatio));
+      pixelRatio = nextRatio;
+
+      ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+
+      if (snapshot) {
+        const oldWidth = canvas.width / pixelRatio;
+        const oldHeight = canvas.height / pixelRatio;
+        const prevWidth = snapshot.width / pixelRatio;
+        const prevHeight = snapshot.height / pixelRatio;
+
+        ctx.drawImage(
+          snapshot,
+          0,
+          0,
+          prevWidth,
+          prevHeight,
+          0,
+          0,
+          oldWidth,
+          oldHeight
+        );
+      }
+
+      hasInitializedSize = true;
+    };
+
+    const getPoint = (event) => {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top
+      };
+    };
+
+    resizeCanvas();
+
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => {
+        if (!canvas.isConnected) {
+          observer.disconnect();
+          return;
+        }
+        resizeCanvas();
+      });
+      observer.observe(canvas);
+    }
+
+    canvas.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+
+      drawing = true;
+      canvas.setPointerCapture?.(event.pointerId);
+
+      const point = getPoint(event);
+      lastX = point.x;
+      lastY = point.y;
+    });
+
+    canvas.addEventListener("pointermove", (event) => {
+      if (!drawing) return;
+
+      const point = getPoint(event);
+      const color = content.querySelector("[data-color]")?.value || "#1a73e8";
+      const size = Number(content.querySelector("[data-size]")?.value || 5);
+
+      ctx.beginPath();
+      ctx.moveTo(lastX, lastY);
+      ctx.lineTo(point.x, point.y);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = size;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.stroke();
+
+      lastX = point.x;
+      lastY = point.y;
+    });
+
+    const stopDrawing = () => {
+      drawing = false;
+    };
+
+    canvas.addEventListener("pointerup", stopDrawing);
+    canvas.addEventListener("pointercancel", stopDrawing);
+    canvas.addEventListener("lostpointercapture", stopDrawing);
+
+    content.querySelector("[data-clear]")?.addEventListener("click", () => {
+      const rect = canvas.getBoundingClientRect();
+      ctx.clearRect(0, 0, rect.width, rect.height);
+    });
+  }
+
+  if (appName === "minesweeper") {
+    bindMinesweeperEvents(content);
   }
 
   if (appName === "notepad") {
@@ -837,6 +924,179 @@ function bindAppContentEvents(appName, win) {
       notify(state.darkMode ? "已切换到深色模式" : "已切换到浅色模式");
     });
   }
+}
+
+function bindMinesweeperEvents(content) {
+  const grid = content.querySelector(".mine-grid");
+  const status = content.querySelector(".mine-status-text");
+  const restartButton = content.querySelector("[data-mine-restart]");
+
+  if (!grid || !status) return;
+
+  const size = 9;
+  const mineCount = 10;
+
+  let cells = [];
+  let started = false;
+  let gameOver = false;
+  let flags = 0;
+  let revealedCount = 0;
+
+  const neighborsOf = (index) => {
+    const row = Math.floor(index / size);
+    const col = index % size;
+    const neighbors = [];
+
+    for (let rowOffset = -1; rowOffset <= 1; rowOffset++) {
+      for (let colOffset = -1; colOffset <= 1; colOffset++) {
+        if (rowOffset === 0 && colOffset === 0) continue;
+
+        const nextRow = row + rowOffset;
+        const nextCol = col + colOffset;
+
+        if (nextRow >= 0 && nextRow < size && nextCol >= 0 && nextCol < size) {
+          neighbors.push(nextRow * size + nextCol);
+        }
+      }
+    }
+
+    return neighbors;
+  };
+
+  const updateStatus = (message = "") => {
+    status.textContent = message || `剩余 ${Math.max(0, mineCount - flags)} 面旗`;
+  };
+
+  const render = () => {
+    grid.querySelectorAll(".mine-cell").forEach((button, index) => {
+      const cell = cells[index];
+      if (!cell) return;
+
+      button.classList.toggle("open", cell.revealed);
+      button.classList.toggle("flagged", cell.flagged);
+      button.classList.toggle("mine", gameOver && cell.mine);
+
+      if (cell.flagged && !cell.revealed) {
+        button.textContent = "🚩";
+      } else if (cell.revealed && cell.mine) {
+        button.textContent = "💣";
+      } else if (cell.revealed && cell.neighborCount > 0) {
+        button.textContent = String(cell.neighborCount);
+        button.dataset.count = String(cell.neighborCount);
+      } else {
+        button.textContent = "";
+        delete button.dataset.count;
+      }
+
+      button.disabled = gameOver || cell.revealed;
+    });
+  };
+
+  const startGame = (safeIndex = null) => {
+    cells = Array.from({ length: size * size }, () => ({
+      mine: false,
+      revealed: false,
+      flagged: false,
+      neighborCount: 0
+    }));
+
+    const safeCells = new Set(safeIndex === null ? [] : [safeIndex, ...neighborsOf(safeIndex)]);
+
+    const mineCandidates = Array.from({ length: size * size }, (_, index) => index)
+      .filter(index => !safeCells.has(index));
+
+    for (let index = mineCandidates.length - 1; index > 0; index--) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [mineCandidates[index], mineCandidates[swapIndex]] = [mineCandidates[swapIndex], mineCandidates[index]];
+    }
+
+    mineCandidates.slice(0, mineCount).forEach(index => {
+      cells[index].mine = true;
+    });
+
+    cells.forEach((cell, index) => {
+      if (cell.mine) return;
+      cell.neighborCount = neighborsOf(index).filter(neighborIndex => cells[neighborIndex].mine).length;
+    });
+
+    started = true;
+    gameOver = false;
+    flags = 0;
+    revealedCount = 0;
+    updateStatus();
+    render();
+  };
+
+  const finishGame = (won) => {
+    gameOver = true;
+    updateStatus(won ? "恭喜，扫雷成功！" : "踩到地雷，游戏结束。");
+    render();
+  };
+
+  const reveal = (index) => {
+    const cell = cells[index];
+    if (!cell || cell.revealed || cell.flagged || gameOver) return;
+
+    cell.revealed = true;
+
+    if (cell.mine) {
+      finishGame(false);
+      return;
+    }
+
+    revealedCount += 1;
+
+    if (cell.neighborCount === 0) {
+      neighborsOf(index).forEach(neighborIndex => {
+        if (!cells[neighborIndex].revealed) reveal(neighborIndex);
+      });
+    }
+
+    if (revealedCount === size * size - mineCount) {
+      finishGame(true);
+      return;
+    }
+
+    updateStatus();
+    render();
+  };
+
+  grid.addEventListener("click", (event) => {
+    const button = event.target.closest(".mine-cell");
+    if (!button || gameOver) return;
+
+    const index = Number(button.dataset.index);
+    if (!Number.isInteger(index) || index < 0 || index >= cells.length) return;
+
+    if (!started) {
+      startGame(index);
+    }
+
+    reveal(index);
+  });
+
+  grid.addEventListener("contextmenu", (event) => {
+    const button = event.target.closest(".mine-cell");
+    if (!button) return;
+
+    event.preventDefault();
+    if (gameOver) return;
+
+    const index = Number(button.dataset.index);
+    const cell = cells[index];
+    if (!cell || cell.revealed) return;
+
+    cell.flagged = !cell.flagged;
+    flags += cell.flagged ? 1 : -1;
+    updateStatus();
+    render();
+  });
+
+  restartButton?.addEventListener("click", () => {
+    startGame();
+  });
+
+  startGame();
 }
 
 function runTerminalCommand(cmd) {
@@ -1112,14 +1372,24 @@ function renderTerminal() {
 
 function renderMinesweeper() {
   const cells = [];
-  for (let i = 0; i < 81; i++) {
-    cells.push(`<button class="mine-cell" data-index="${i}"></button>`);
+
+  for (let index = 0; index < 81; index++) {
+    cells.push(`
+      <button
+        class="mine-cell"
+        type="button"
+        data-index="${index}"
+        aria-label="第 ${index + 1} 格，未揭开"
+      ></button>
+    `);
   }
+
   return `
     <div class="minesweeper">
       <div class="mine-status">
         <span>💣 扫雷</span>
-        <span>剩余 10</span>
+        <span class="mine-status-text" aria-live="polite">剩余 10 面旗</span>
+        <button data-mine-restart type="button">重新开始</button>
       </div>
       <div class="mine-grid">
         ${cells.join("")}

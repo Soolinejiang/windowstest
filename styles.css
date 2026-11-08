@@ -759,6 +759,18 @@ textarea:focus-visible {
   margin-bottom: 12px;
   font-size: 14px;
   font-weight: 700;
+  gap: 10px;
+}
+
+.mine-status button {
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(82, 125, 243, 0.12);
+}
+
+.mine-status-text {
+  flex: 1;
+  text-align: center;
 }
 
 .mine-grid {
@@ -792,6 +804,19 @@ textarea:focus-visible {
   background: #ff6a6a;
   color: white;
 }
+
+.mine-cell.flagged {
+  background: #fff3cd;
+}
+
+.mine-cell[data-count="1"] { color: #1769aa; }
+.mine-cell[data-count="2"] { color: #248a45; }
+.mine-cell[data-count="3"] { color: #d33b32; }
+.mine-cell[data-count="4"] { color: #643c9e; }
+.mine-cell[data-count="5"] { color: #8a4c24; }
+.mine-cell[data-count="6"] { color: #138b8b; }
+.mine-cell[data-count="7"] { color: #333; }
+.mine-cell[data-count="8"] { color: #777; }
 
 .taskmgr {
   width: 100%;
@@ -984,4 +1009,23 @@ textarea:focus-visible {
   margin: 0 0 14px;
   color: var(--muted);
   line-height: 1.7;
+}
+
+@media (max-width: 430px) {
+  .mine-grid {
+    grid-template-columns: repeat(9, minmax(24px, 1fr));
+    grid-template-rows: repeat(9, minmax(24px, 1fr));
+    gap: 2px;
+    width: 100%;
+    padding: 5px;
+  }
+
+  .mine-cell {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1;
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+  }
 }
